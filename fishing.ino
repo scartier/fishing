@@ -33,6 +33,7 @@ enum LakeDepth : uint8_t
 };
 
 // ----------------------------------------------------------------------------------------------------
+// FISH
 
 #define FISH_SPAWN_RATE_MIN (5000>>7)
 #define FISH_SPAWN_RATE_MAX (10000>>7)
@@ -66,6 +67,7 @@ struct FishInfo
 FishInfo residentFish[MAX_FISH_PER_TILE];
 
 // ----------------------------------------------------------------------------------------------------
+// FISH MOVEMENT
 
 byte nextMoveFaceArray[6][6] =
 {
@@ -78,6 +80,7 @@ byte nextMoveFaceArray[6][6] =
 };
 
 // ----------------------------------------------------------------------------------------------------
+// TILE
 
 struct TileInfo
 {
@@ -89,11 +92,52 @@ TileInfo tileInfo;
 LakeDepth prevLakeDepth;
 TileInfo neighborTileInfo[FACE_COUNT];
 bool sendOurTileInfo = false;
+byte numNeighborLakeTiles = 0;
 
 // ----------------------------------------------------------------------------------------------------
+// PLAYER
 
-byte numNeighborLakeTiles = 0;
-bool transmitNewDepth = false;
+#define MAX_PLAYER_COLORS 7
+uint16_t playerColors[] =
+{
+  RGB_TO_U16( 160,  32,   0 ),
+  RGB_TO_U16( 192, 192,  96 ),
+  RGB_TO_U16( 224, 160,   0 ),
+  RGB_TO_U16( 112, 112,   0 ),
+  RGB_TO_U16( 216, 144,   0 ),
+  RGB_TO_U16(  16, 184,   0 ),
+  RGB_TO_U16( 128,   0, 128 ),
+};
+
+byte playerColorIndex = 0;
+
+enum PlayerState
+{
+  PlayerState_Idle,           // detached from lake
+  PlayerState_GetCastAngle,   // sweeping left/right waiting for player to click
+  PlayerState_GetCastPower,   // sweeping forward/back waiting for player to release
+  PlayerState_Casting,
+  PlayerState_WaitingForFish
+};
+PlayerState playerState = PlayerState_Idle;
+
+#define CAST_ANGLE_SWEEP_INC 10
+byte castFaceStart, castFaceEnd;
+byte castFace, castAngle;
+#define CAST_POWER_SWEEP_INC 5
+byte castPower;
+
+enum CastSweepDirection
+{
+  CastSweepDirection_CW,
+  CastSweepDirection_CCW,
+
+  CastSweepDirection_Up = CastSweepDirection_CW,
+  CastSweepDirection_Down = CastSweepDirection_CCW,
+};
+CastSweepDirection castSweepDirection;    // true = forward, false = backward
+
+// ----------------------------------------------------------------------------------------------------
 
 // ----------------------------------------------------------------------------------------------------
 
@@ -104,6 +148,11 @@ enum Command : uint8_t
   Command_FishSpawned,      // Broadcast out when a tile spawns a fish - temporarily inhibits spawning in other tiles
   Command_FishTransfer,     // Sent when one tile is trying to transfer a fish to a neighbor
   Command_FishAccepted,     // Response indicating the transfer was accepted
+
+  Command_CastDir0,
+  Command_CastDir1,
+  Command_CastDir2,
+  Command_CastDir3,
 };
 
 // ====================================================================================================
@@ -120,15 +169,15 @@ void setup()
 
   randState=serial_num_32;
 
-  reset();
+  resetLakeTile();
 }
 
 // ----------------------------------------------------------------------------------------------------
 
-void reset()
+void resetLakeTile()
 {
   tileInfo.tileType = TileType_Lake;
-  tileInfo.lakeDepth = LakeDepth_Shallow;
+  tileInfo.lakeDepth = LakeDepth_Unknown;
 
   numFishToSpawn = 1;
   resetSpawnTimer();
@@ -137,6 +186,14 @@ void reset()
   {
     residentFish[fish].fishType = FishType_None;
   }
+}
+
+// ----------------------------------------------------------------------------------------------------
+
+void resetPlayerTile()
+{
+  tileInfo.tileType = TileType_Player;
+  playerState = PlayerState_Idle;
 }
 
 // ====================================================================================================
@@ -152,11 +209,17 @@ void processCommForFace(byte commandByte, byte value, byte f)
   switch (command)
   {
     case Command_TileType:
-      neighborTileInfo[f].tileType = (TileType) value;
-      if (neighborTileInfo[f].tileType == TileType_Lake)
+      if (neighborTileInfo[f].tileType != (TileType) value)
       {
-        // Expect the next comm to be the neighbor's depth
-        neighborTileInfo[f].lakeDepth = LakeDepth_Unknown;
+        neighborTileInfo[f].tileType = (TileType) value;
+        if (neighborTileInfo[f].tileType == TileType_Lake)
+        {
+          // Expect the next comm to be the neighbor's depth
+          neighborTileInfo[f].lakeDepth = LakeDepth_Unknown;
+        }
+
+        // Force the player to recompute casting info
+        playerState = PlayerState_Idle;
       }
       break;
 
@@ -300,8 +363,10 @@ void loop()
   prevLakeDepth = tileInfo.lakeDepth;
 
   commReceive();
-
   detectNeighbors();
+
+  handleUserInput();
+
   switch (tileInfo.tileType)
   {
     case TileType_Lake:
@@ -347,6 +412,13 @@ void detectNeighbors()
     {
       // No neighbor
 
+      // Was neighbor just removed?
+      if (neighborTileInfo[f].tileType != TileType_NotPresent)
+      {
+        // If we are a player tile then force recompute the casting info
+        playerState = PlayerState_Idle;
+      }
+
       neighborTileInfo[f].tileType = TileType_NotPresent;
     }
     else
@@ -359,6 +431,9 @@ void detectNeighbors()
         // New neighbor
         neighborTileInfo[f].tileType = TileType_Unknown;
         determineOurLakeDepth();
+
+        // If we are a player tile then force recompute the casting info
+        playerState = PlayerState_Idle;
 
         // Force us to send out our tile info to the new neighbor
         sendOurTileInfo = true;
@@ -385,6 +460,38 @@ void detectNeighbors()
 
 // ----------------------------------------------------------------------------------------------------
 
+void handleUserInput()
+{
+    // Swap between player tile and lake tile with triple click
+  if (buttonMultiClicked() && buttonClickCount() == 3)
+  {
+    if (tileInfo.tileType == TileType_Lake)
+    {
+      resetPlayerTile();
+    }
+    else
+    {
+      resetLakeTile();
+    }
+    sendOurTileInfo = true;
+    return;
+  }
+
+  if (buttonSingleClicked())
+  {
+    if (tileInfo.tileType == TileType_Player)
+    {
+      playerColorIndex++;
+      if (playerColorIndex >= MAX_PLAYER_COLORS)
+      {
+        playerColorIndex = 0;
+      }
+    }
+  }
+}
+
+// ----------------------------------------------------------------------------------------------------
+
 void loop_Lake()
 {
   tryToSpawnFish();
@@ -395,6 +502,145 @@ void loop_Lake()
 
 void loop_Player()
 {
+  switch (playerState)
+  {
+    case PlayerState_Idle:
+      {
+        if (numNeighborLakeTiles > 0 && numNeighborLakeTiles <= 3)
+        {
+          // Let the player cast their line
+          playerState = PlayerState_GetCastAngle;
+
+          // Find any face with a lake neighbor
+          FOREACH_FACE(f)
+          {
+            if (neighborTileInfo[f].tileType == TileType_Lake)
+            {
+              castFaceStart = castFaceEnd = f;
+              break;
+            }
+          }
+
+          // Go CCW from there looking for the first face
+          FOREACH_FACE(f)
+          {
+            byte faceTest = CCW_FROM_FACE(castFaceStart, 1);
+            if (neighborTileInfo[faceTest].tileType != TileType_Lake)
+            {
+              break;
+            }
+            castFaceStart = faceTest;
+          }
+          
+          // Go CW from there looking for the last face
+          FOREACH_FACE(f)
+          {
+            byte faceTest = CW_FROM_FACE(castFaceEnd, 1);
+            if (neighborTileInfo[faceTest].tileType != TileType_Lake)
+            {
+              break;
+            }
+            castFaceEnd = faceTest;
+          }
+
+          // Got the face range - start sweeping side to side
+          castSweepDirection = CastSweepDirection_CW;
+          castFace = castFaceStart;
+          castAngle = 0;
+        }
+      }
+      break;
+
+    case PlayerState_GetCastAngle:
+      {
+        if (buttonDown())
+        {
+          playerState = PlayerState_GetCastPower;
+          castPower = 0;
+          castSweepDirection = CastSweepDirection_Up;
+        }
+        else
+        {
+          if (castSweepDirection == CastSweepDirection_CW)
+          {
+            if (castAngle <= (255 - CAST_ANGLE_SWEEP_INC))
+            {
+              castAngle += CAST_ANGLE_SWEEP_INC;
+            }
+            else if (castFace != castFaceEnd)
+            {
+              castFace = CW_FROM_FACE(castFace, 1);
+              castAngle += CAST_ANGLE_SWEEP_INC;
+            }
+            else
+            {
+              castAngle = 255;
+              castSweepDirection = CastSweepDirection_CCW;
+            }
+          }
+          else
+          {
+            if (castAngle >= CAST_ANGLE_SWEEP_INC)
+            {
+              castAngle -= CAST_ANGLE_SWEEP_INC;
+            }
+            else if (castFace != castFaceStart)
+            {
+              castFace = CCW_FROM_FACE(castFace, 1);
+              castAngle -= CAST_ANGLE_SWEEP_INC;
+            }
+            else
+            {
+              castAngle = 0;
+              castSweepDirection = CastSweepDirection_CW;
+            }
+          }
+        }
+      }
+      break;
+
+    case PlayerState_GetCastPower:
+      {
+        if (buttonReleased())
+        {
+          //playerState = PlayerState_Casting;
+        }
+        else
+        {
+          if (castSweepDirection == CastSweepDirection_Up)
+          {
+            if (castPower <= (255 - CAST_POWER_SWEEP_INC))
+            {
+              castPower += CAST_POWER_SWEEP_INC;
+            }
+            else if (castPower == 255)
+            {
+              castSweepDirection = CastSweepDirection_Down;
+            }
+            else
+            {
+              castPower = 255;
+            }
+          }
+          else
+          {
+            if (castPower >= CAST_POWER_SWEEP_INC)
+            {
+              castPower -= CAST_POWER_SWEEP_INC;
+            }
+            else if (castPower == 0)
+            {
+              castSweepDirection = CastSweepDirection_Up;
+            }
+            else
+            {
+              castPower = 0;
+            }
+          }
+        }
+      }
+      break;
+  }
 }
 
 // ----------------------------------------------------------------------------------------------------
@@ -415,9 +661,16 @@ void resetSpawnTimer()
 
 void tryToSpawnFish()
 {
-  // Fish can only spawn on lake tiles
+  // Fish can only spawn on lake tiles with defined depth
   if (tileInfo.tileType != TileType_Lake)
   {
+    return;
+  }
+
+  // Can't spawn fish until we know how deep we are
+  if (tileInfo.lakeDepth == LakeDepth_Unknown)
+  {
+    resetSpawnTimer();
     return;
   }
 
@@ -433,30 +686,28 @@ void tryToSpawnFish()
     return;
   }
 
-  // Spawn the fish, if there's an open slot
+  // Don't spawn if there's already a fish here
   for (byte fishIndex = 0; fishIndex < MAX_FISH_PER_TILE; fishIndex++)
   {
     if (residentFish[fishIndex].fishType != FishType_None)
     {
-      continue;
+      return;
     }
-
-    // Found an empty slot
-
-    // Add the fish
-    numFishToSpawn--;
-    residentFish[fishIndex].fishType = FishType_Small;
-    residentFish[fishIndex].curFace = randRange(0, 6);
-    assignFishMoveTarget(fishIndex);
-    residentFish[fishIndex].moveTimer.set(FISH_MOVE_RATE_PAUSE);
-
-    // Tell the entire lake we just spawned a fish so they delay spawning theirs
-    broadcastCommToAllNeighbors(Command_FishSpawned, DONT_CARE);
-    broadcastDelay.set(BROADCAST_DELAY_RATE);
-
-    // Break out so we don't spawn more than one
-    break;
   }
+
+  // Spawn the fish in the first slot
+  byte fishIndex = 0;
+
+  numFishToSpawn--;
+  residentFish[fishIndex].fishType = FishType_Small;
+  residentFish[fishIndex].curFace = randRange(0, 6);
+  assignFishMoveTarget(fishIndex);
+  residentFish[fishIndex].moveTimer.set(FISH_MOVE_RATE_PAUSE);
+
+  // Tell the entire lake we just spawned a fish so they delay spawning theirs
+  // Help control the fish population...
+  broadcastCommToAllNeighbors(Command_FishSpawned, DONT_CARE);
+  broadcastDelay.set(BROADCAST_DELAY_RATE);
 }
 
 // ----------------------------------------------------------------------------------------------------
@@ -593,7 +844,65 @@ void render()
       break;
 
     case TileType_Player:
-      setColor(WHITE);
+      {
+        color.as_uint16 = playerColors[playerColorIndex];
+        switch (playerState)
+        {
+          case PlayerState_Idle:
+            setFaceColor(0, color);
+            setFaceColor(3, WHITE);
+            break;
+
+          case PlayerState_GetCastAngle:
+            {
+              //setFaceColor(castFaceStart, BLUE);
+              //setFaceColor(castFaceEnd, YELLOW);
+
+              // Light up the face in the direction the player is casting
+              setFaceColor(castFace, WHITE);
+
+              // The player's color goes on the opposite face
+              byte otherFace = CW_FROM_FACE(castFace, 3);
+              color.as_uint16 = playerColors[playerColorIndex];
+              setFaceColor(otherFace, color);
+            }
+            break;
+
+          case PlayerState_GetCastPower:
+            {
+              setFaceColor(castFace, WHITE);
+
+              byte otherFace = CW_FROM_FACE(castFace, 3);
+              color.as_uint16 = playerColors[playerColorIndex];
+              setFaceColor(otherFace, color);
+
+              if (castPower < 64)
+              {
+                byte otherFace = CW_FROM_FACE(castFace, 3);
+                setFaceColor(otherFace, YELLOW);
+              }
+              else if (castPower < 128)
+              {
+                byte otherFace = CW_FROM_FACE(castFace, 2);
+                setFaceColor(otherFace, YELLOW);
+                otherFace = CCW_FROM_FACE(castFace, 2);
+                setFaceColor(otherFace, YELLOW);
+              }
+              else if (castPower < 192)
+              {
+                byte otherFace = CW_FROM_FACE(castFace, 1);
+                setFaceColor(otherFace, YELLOW);
+                otherFace = CCW_FROM_FACE(castFace, 1);
+                setFaceColor(otherFace, YELLOW);
+              }
+              else
+              {
+                setFaceColor(castFace, YELLOW);
+              }
+            }
+            break;
+        }
+      }
       break;
 
     default:
