@@ -9,6 +9,7 @@ byte faceOffsetArray[] = { 0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5 };
 
 #define DONT_CARE 0
 #define INVALID_FACE 7
+#define INVALID_PLAYER 15
 
 // ----------------------------------------------------------------------------------------------------
 
@@ -121,6 +122,9 @@ enum PlayerState
 };
 PlayerState playerState = PlayerState_Idle;
 
+// ----------------------------------------------------------------------------------------------------
+// CASTING
+
 #define CAST_ANGLE_SWEEP_INC 10
 byte castFaceStart, castFaceEnd;
 byte castFace, castAngle;
@@ -137,6 +141,44 @@ enum CastSweepDirection
 };
 CastSweepDirection castSweepDirection;    // true = forward, false = backward
 
+struct CastInfo
+{
+  byte playerNum;   // the player number that cast this line
+  byte faceIn;      // the face where the line enters from the player
+  byte faceOut;     // the face where the line exits towards the lake (INVALID if there is no exit)
+};
+#define MAX_CASTS_PER_TILE 4
+CastInfo castInfo[MAX_CASTS_PER_TILE];
+
+byte savedPlayerNum[FACE_COUNT];  // saved player number from a Command_PlayerNum
+
+enum CastStep
+{
+  CastStep_Left     = 2,    // the value is the number of faces to go CW from the entry face
+  CastStep_Straight = 3,
+  CastStep_Right    = 4,
+};
+
+#define MAX_CAST_ANGLES 5
+#define MAX_CAST_STEPS 3
+#define MAX_CAST_POWERS 4
+CastStep castSteps[MAX_CAST_ANGLES][MAX_CAST_STEPS] =
+{
+  { CastStep_Left,      CastStep_Right,     CastStep_Left     },
+  { CastStep_Straight,  CastStep_Left,      CastStep_Right    },
+  { CastStep_Straight,  CastStep_Straight,  CastStep_Straight },
+  { CastStep_Straight,  CastStep_Right,     CastStep_Left     },
+  { CastStep_Right,     CastStep_Left,      CastStep_Right    }
+};
+
+byte powerToAngle[MAX_CAST_POWERS][MAX_CAST_ANGLES] =
+{
+  { 255, 255, 255, 255, 255 },  // doesn't matter which one is selected
+  {  64,  64, 192, 192, 255 },  // skip dir1 & dir3
+  {  64,  64, 192, 192, 255 },  // skip dir1 & dir3
+  {  32,  96, 160, 224, 255 },
+};
+
 // ----------------------------------------------------------------------------------------------------
 
 // ----------------------------------------------------------------------------------------------------
@@ -149,10 +191,17 @@ enum Command : uint8_t
   Command_FishTransfer,     // Sent when one tile is trying to transfer a fish to a neighbor
   Command_FishAccepted,     // Response indicating the transfer was accepted
 
+  Command_PlayerNum,        // Sent before a cast to tell the receiver which player this is for
+
   Command_CastDir0,
   Command_CastDir1,
   Command_CastDir2,
   Command_CastDir3,
+  Command_CastDir4,
+
+  Command_BreakLine,        // Sent from end of line back to player when something broke the line
+  Command_TugLine,          // Player clicked tile to nudge the line
+  Command_ReelLine,         // Player is holding the button down to reel in the line
 };
 
 // ====================================================================================================
@@ -182,9 +231,16 @@ void resetLakeTile()
   numFishToSpawn = 1;
   resetSpawnTimer();
 
+  // Reset the list of fish in this tile
   for (byte fish = 0; fish < MAX_FISH_PER_TILE; fish++)
   {
     residentFish[fish].fishType = FishType_None;
+  }
+
+  // Reset the list of casts through this tile
+  for (byte castIndex = 0; castIndex < MAX_CASTS_PER_TILE; castIndex++)
+  {
+    castInfo[castIndex].playerNum = INVALID_PLAYER;
   }
 }
 
@@ -270,6 +326,103 @@ void processCommForFace(byte commandByte, byte value, byte f)
         residentFish[value].fishType = FishType_None;
       }
       break;
+
+    case Command_PlayerNum:
+      savedPlayerNum[f] = value;
+      break;
+
+    case Command_CastDir0:
+    case Command_CastDir1:
+    case Command_CastDir2:
+    case Command_CastDir3:
+    case Command_CastDir4:
+      // Capture the casting info
+      {
+        bool found = false;
+        for (byte castIndex = 0; castIndex < MAX_CASTS_PER_TILE; castIndex++)
+        {
+          if (castInfo[castIndex].playerNum == INVALID_PLAYER)
+          {
+            // Found an empty slot - use it for this cast
+            found = true;
+            castInfo[castIndex].playerNum = savedPlayerNum[f];
+            castInfo[castIndex].faceIn = f;
+            castInfo[castIndex].faceOut = INVALID_FACE; // assume we are done stepping
+
+            byte castDir = command - Command_CastDir0;
+            byte stepsToGo = value & 0x3;
+            byte currentStep = value >> 2;
+            if (stepsToGo > 0)
+            {
+              byte castStepDir = castSteps[castDir][currentStep];
+              byte castFaceOut = CW_FROM_FACE(f, castStepDir);
+              castInfo[castIndex].faceOut = castFaceOut;
+
+              if (neighborTileInfo[castFaceOut].tileType != TileType_Lake)
+              {
+                // Break line if there isn't a tile to go to
+                enqueueCommOnFace(f, Command_BreakLine, savedPlayerNum[f]);
+                castInfo[castIndex].playerNum = INVALID_PLAYER;
+              }
+              else
+              {
+                // Continue the casting to the next tile
+                stepsToGo--;
+                currentStep++;
+                enqueueCommOnFace(castFaceOut, Command_PlayerNum, castInfo[castIndex].playerNum);
+                byte castData = (currentStep << 2) | stepsToGo;
+                enqueueCommOnFace(castFaceOut, command, castData);  // same command since it encodes the direction
+              }
+            }
+            break;
+          }
+        }
+        if (!found)
+        {
+          // Too many lines passing through here
+          // Tell the new one to go away
+          enqueueCommOnFace(f, Command_BreakLine, savedPlayerNum[f]);
+        }
+      }
+      break;
+      
+    case Command_BreakLine:
+      // Data holds the player number
+      // Use that, with the face, to match the entry in our castInfo array
+      breakLine(f, value);
+      break;
+
+  }
+}
+
+// ----------------------------------------------------------------------------------------------------
+
+void breakLine(byte sourceFace, byte playerNum)
+{
+  // Data holds the player number
+  // Use that, with the face, to match the entry in our castInfo array
+  for (byte castIndex = 0; castIndex < MAX_CASTS_PER_TILE; castIndex++)
+  {
+    if (playerNum == INVALID_PLAYER || playerNum == castInfo[castIndex].playerNum)
+    {
+      if (sourceFace == castInfo[castIndex].faceIn)
+      {
+        castInfo[castIndex].playerNum = INVALID_PLAYER;
+
+        // Propagate the message to the rest of the line
+        if (castInfo[castIndex].faceOut != INVALID_FACE)
+        {
+          enqueueCommOnFace(castInfo[castIndex].faceOut, Command_BreakLine, playerNum);
+        }
+      }
+      else if (castInfo[castIndex].faceOut != INVALID_FACE && sourceFace == castInfo[castIndex].faceOut)
+      {
+        castInfo[castIndex].playerNum = INVALID_PLAYER;
+
+        // Propagate the message to the rest of the line
+        enqueueCommOnFace(castInfo[castIndex].faceIn, Command_BreakLine, playerNum);
+      }
+    }
   }
 }
 
@@ -417,6 +570,19 @@ void detectNeighbors()
       {
         // If we are a player tile then force recompute the casting info
         playerState = PlayerState_Idle;
+
+        // Removing a player with a cast line breaks the line
+        if (neighborTileInfo[f].tileType == TileType_Player)
+        {
+          for (byte castIndex = 0; castIndex < MAX_CASTS_PER_TILE; castIndex++)
+          {
+            // Need to find the player number from our list of casts
+            if (castInfo[castIndex].faceIn == f)
+            {
+              breakLine(f, castInfo[castIndex].playerNum);
+            }
+          }
+        }
       }
 
       neighborTileInfo[f].tileType = TileType_NotPresent;
@@ -506,10 +672,14 @@ void loop_Player()
   {
     case PlayerState_Idle:
       {
+        // Placing their tile next to the lake will make a player go into casting mode
+        // It starts out by sweeping back-and-forth between the lake tiles it is touching
         if (numNeighborLakeTiles > 0 && numNeighborLakeTiles <= 3)
         {
-          // Let the player cast their line
           playerState = PlayerState_GetCastAngle;
+
+          // Clear the buttonDown flag
+          buttonDown();
 
           // Find any face with a lake neighbor
           FOREACH_FACE(f)
@@ -521,7 +691,7 @@ void loop_Player()
             }
           }
 
-          // Go CCW from there looking for the first face
+          // Go CCW from there looking for the first face...
           FOREACH_FACE(f)
           {
             byte faceTest = CCW_FROM_FACE(castFaceStart, 1);
@@ -532,7 +702,7 @@ void loop_Player()
             castFaceStart = faceTest;
           }
           
-          // Go CW from there looking for the last face
+          // ...and go CW from there looking for the last face
           FOREACH_FACE(f)
           {
             byte faceTest = CW_FROM_FACE(castFaceEnd, 1);
@@ -555,9 +725,14 @@ void loop_Player()
       {
         if (buttonDown())
         {
+          // Once the player clicks the button they lock in the angle and start
+          // selecting the power
           playerState = PlayerState_GetCastPower;
           castPower = 0;
           castSweepDirection = CastSweepDirection_Up;
+
+          // Clear the released flag
+          buttonReleased();
         }
         else
         {
@@ -603,7 +778,24 @@ void loop_Player()
       {
         if (buttonReleased())
         {
-          //playerState = PlayerState_Casting;
+          // Releasing the button casts the line at the chosen angle+power
+          playerState = PlayerState_Casting;
+
+          // Find the angle (and thus pattern) based on the power
+          byte power = castPower >> 6;
+          byte dirIndex = 0;
+          for (; dirIndex < MAX_CAST_ANGLES; dirIndex++)
+          {
+            if (powerToAngle[power][dirIndex] > castAngle)
+            {
+              break;
+            }
+          }
+
+          enqueueCommOnFace(castFace, Command_PlayerNum, playerColorIndex);
+          byte castCommand = Command_CastDir0 + dirIndex;
+          byte data = power;    // bits [3:2] are zero, indicating this is the first step
+          enqueueCommOnFace(castFace, castCommand, data);
         }
         else
         {
@@ -840,6 +1032,18 @@ void render()
             setFaceColor(residentFish[fishIndex].curFace, WHITE);
           }
         }
+
+        for (byte castIndex = 0; castIndex < MAX_CASTS_PER_TILE; castIndex++)
+        {
+          if (castInfo[castIndex].playerNum != INVALID_PLAYER)
+          {
+            setFaceColor(castInfo[castIndex].faceIn, WHITE);
+            if (castInfo[castIndex].faceOut != INVALID_FACE)
+            {
+              setFaceColor(castInfo[castIndex].faceOut, WHITE);
+            }
+          }
+        }
       }
       break;
 
@@ -879,25 +1083,25 @@ void render()
               if (castPower < 64)
               {
                 byte otherFace = CW_FROM_FACE(castFace, 3);
-                setFaceColor(otherFace, YELLOW);
+                setFaceColor(otherFace, color);
               }
               else if (castPower < 128)
               {
                 byte otherFace = CW_FROM_FACE(castFace, 2);
-                setFaceColor(otherFace, YELLOW);
+                setFaceColor(otherFace, color);
                 otherFace = CCW_FROM_FACE(castFace, 2);
-                setFaceColor(otherFace, YELLOW);
+                setFaceColor(otherFace, color);
               }
               else if (castPower < 192)
               {
                 byte otherFace = CW_FROM_FACE(castFace, 1);
-                setFaceColor(otherFace, YELLOW);
+                setFaceColor(otherFace, color);
                 otherFace = CCW_FROM_FACE(castFace, 1);
-                setFaceColor(otherFace, YELLOW);
+                setFaceColor(otherFace, color);
               }
               else
               {
-                setFaceColor(castFace, YELLOW);
+                setFaceColor(castFace, color);
               }
             }
             break;
