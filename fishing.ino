@@ -399,6 +399,13 @@ void processCommForFace(byte commandByte, byte value, byte f)
 
 void breakLine(byte sourceFace, byte playerNum)
 {
+  // If a player receives this then their line was broken and they should go back to idle
+  if (tileInfo.tileType == TileType_Player)
+  {
+    playerState = PlayerState_Idle;
+    return;
+  }
+
   // Data holds the player number
   // Use that, with the face, to match the entry in our castInfo array
   for (byte castIndex = 0; castIndex < MAX_CASTS_PER_TILE; castIndex++)
@@ -571,16 +578,13 @@ void detectNeighbors()
         // If we are a player tile then force recompute the casting info
         playerState = PlayerState_Idle;
 
-        // Removing a player with a cast line breaks the line
-        if (neighborTileInfo[f].tileType == TileType_Player)
+        // Removing the source of a cast breaks the line
+        for (byte castIndex = 0; castIndex < MAX_CASTS_PER_TILE; castIndex++)
         {
-          for (byte castIndex = 0; castIndex < MAX_CASTS_PER_TILE; castIndex++)
+          // Need to find the player number from our list of casts
+          if (castInfo[castIndex].faceIn == f || castInfo[castIndex].faceOut == f)
           {
-            // Need to find the player number from our list of casts
-            if (castInfo[castIndex].faceIn == f)
-            {
-              breakLine(f, castInfo[castIndex].playerNum);
-            }
+            breakLine(f, castInfo[castIndex].playerNum);
           }
         }
       }
@@ -853,6 +857,8 @@ void resetSpawnTimer()
 
 void tryToSpawnFish()
 {
+  return;
+
   // Fish can only spawn on lake tiles with defined depth
   if (tileInfo.tileType != TileType_Lake)
   {
