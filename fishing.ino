@@ -25,6 +25,12 @@ enum TileType : uint8_t
   TileType_Player,
 };
 
+// ----------------------------------------------------------------------------------------------------
+// LAKE
+#define LAKE_COLOR_SHALLOW  RGB_TO_U16(  0, 64, 128 )
+#define LAKE_COLOR_MEDIUM   RGB_TO_U16(  0, 32,  96 )
+#define LAKE_COLOR_DEEP     RGB_TO_U16(  0,  0,  64 )
+
 enum LakeDepth : uint8_t
 {
   LakeDepth_Unknown,
@@ -125,10 +131,10 @@ PlayerState playerState = PlayerState_Idle;
 // ----------------------------------------------------------------------------------------------------
 // CASTING
 
-#define CAST_ANGLE_SWEEP_INC 10
+#define CAST_ANGLE_SWEEP_INC 5
 byte castFaceStart, castFaceEnd;
 byte castFace, castAngle;
-#define CAST_POWER_SWEEP_INC 5
+#define CAST_POWER_SWEEP_INC 2
 byte castPower;
 
 enum CastSweepDirection
@@ -181,12 +187,23 @@ byte powerToAngle[MAX_CAST_POWERS][MAX_CAST_ANGLES] =
 
 // ----------------------------------------------------------------------------------------------------
 
+#define SHORE_WAVE_RATE 10000
+Timer shoreWaveTimer;
+
+#define SHORE_WAVE_FADE_RATE 2
+byte shoreWaveValue = 0;
+
+// ----------------------------------------------------------------------------------------------------
+
+#define RIPPLE_FADE_RATE 4
+byte rippleValue = 0;
+byte rippleFace = INVALID_FACE;   // INVALID_FACE means we originated the ripple
+
 // ----------------------------------------------------------------------------------------------------
 
 enum Command : uint8_t
 {
-  Command_TileType,
-  Command_LakeDepth,
+  Command_TileInfo,         // Tile type and lake depth for this tile
   Command_FishSpawned,      // Broadcast out when a tile spawns a fish - temporarily inhibits spawning in other tiles
   Command_FishTransfer,     // Sent when one tile is trying to transfer a fish to a neighbor
   Command_FishAccepted,     // Response indicating the transfer was accepted
@@ -202,6 +219,10 @@ enum Command : uint8_t
   Command_BreakLine,        // Sent from end of line back to player when something broke the line
   Command_TugLine,          // Player clicked tile to nudge the line
   Command_ReelLine,         // Player is holding the button down to reel in the line
+
+  // Effects
+  Command_ShoreWave,
+  Command_RippleOut,        // Graphical effect of the water rippling out from a tile
 };
 
 // ====================================================================================================
@@ -264,23 +285,14 @@ void processCommForFace(byte commandByte, byte value, byte f)
 
   switch (command)
   {
-    case Command_TileType:
-      if (neighborTileInfo[f].tileType != (TileType) value)
+    case Command_TileInfo:
+      if (neighborTileInfo[f].tileType != (TileType) (value & 0x3))
       {
-        neighborTileInfo[f].tileType = (TileType) value;
-        if (neighborTileInfo[f].tileType == TileType_Lake)
-        {
-          // Expect the next comm to be the neighbor's depth
-          neighborTileInfo[f].lakeDepth = LakeDepth_Unknown;
-        }
-
         // Force the player to recompute casting info
         playerState = PlayerState_Idle;
       }
-      break;
-
-    case Command_LakeDepth:
-      processNeighborLakeDepth(f, (LakeDepth) value);
+      neighborTileInfo[f].tileType  = (TileType) (value & 0x3);
+      neighborTileInfo[f].lakeDepth = (LakeDepth) (value >> 2);
       break;
 
     case Command_FishSpawned:
@@ -392,6 +404,18 @@ void processCommForFace(byte commandByte, byte value, byte f)
       breakLine(f, value);
       break;
 
+    case Command_ShoreWave:
+      // Use the timer to prevent infinite spamming
+      if (shoreWaveTimer.getRemaining() < 1000)
+      {
+        shoreWaveTimer.set(0);  // force expire now
+      }
+      break;
+
+    case Command_RippleOut:
+      rippleFace = f;
+      rippleValue = 255;
+      break;
   }
 }
 
@@ -406,8 +430,7 @@ void breakLine(byte sourceFace, byte playerNum)
     return;
   }
 
-  // Data holds the player number
-  // Use that, with the face, to match the entry in our castInfo array
+  // Use player number and face to match the entry in our castInfo array
   for (byte castIndex = 0; castIndex < MAX_CASTS_PER_TILE; castIndex++)
   {
     if (playerNum == INVALID_PLAYER || playerNum == castInfo[castIndex].playerNum)
@@ -435,43 +458,44 @@ void breakLine(byte sourceFace, byte playerNum)
 
 // ----------------------------------------------------------------------------------------------------
 
-void processNeighborLakeDepth(byte f, LakeDepth newNeighborLakeDepth)
+void determineOurLakeDepth()
 {
-  // Doesn't make sense to do this for non-lake tiles
   if (tileInfo.tileType != TileType_Lake)
   {
     return;
   }
+  
+  // Save our current lake depth in case it changes this loop and we need to update our neighbors
+  prevLakeDepth = tileInfo.lakeDepth;
 
-  //LakeDepth oldNeighborLakeDepth = neighborTileInfo[f].lakeDepth;
-  neighborTileInfo[f].lakeDepth = newNeighborLakeDepth;
-
-  // Check if our depth changed as a result of our neighbor changing
-  determineOurLakeDepth();
-}
-
-void determineOurLakeDepth()
-{
-  // If our own depth is 'Shallow' then nothing will change that
-  if (tileInfo.lakeDepth == LakeDepth_Shallow)
+  // If we have an empty neighbor then we must be a shallow tile
+  if (numNeighborLakeTiles < FACE_COUNT)
   {
-    return;
+    tileInfo.lakeDepth = LakeDepth_Shallow;
+  }
+  else
+  {
+    // If we got here then we must be completely surrounded by lake tiles (ie. not 'Shallow')
+
+    // Compute our depth based on our neighbors. We will be one step deeper than the shallowest neighbor.
+    // In practice, this means that any 'Shallow' neighbor forces us to be 'Medium', otherwise we are 'Deep'
+    // Start by assuming we are 'Deep'
+    tileInfo.lakeDepth = LakeDepth_Deep;
+    FOREACH_FACE(f)
+    {
+      if (neighborTileInfo[f].lakeDepth == LakeDepth_Shallow)
+      {
+        // Found a 'Shallow' neighbor - no sense continuing
+        tileInfo.lakeDepth = LakeDepth_Medium;
+        break;
+      }
+    }
   }
 
-  // If we got here then we must be completely surrounded by lake tiles (ie. not 'Shallow')
-
-  // Compute our depth based on our neighbors. We will be one step deeper than the shallowest neighbor.
-  // In practice, this means that any 'Shallow' neighbor forces us to be 'Medium', otherwise we are 'Deep'
-  // Start by assuming we are 'Deep'
-  tileInfo.lakeDepth = LakeDepth_Deep;
-  FOREACH_FACE(f)
+  // If our depth changed then notify our neighbors
+  if (tileInfo.lakeDepth != prevLakeDepth)
   {
-    if (neighborTileInfo[f].lakeDepth == LakeDepth_Shallow)
-    {
-      // Found a 'Shallow' neighbor - no sense continuing
-      tileInfo.lakeDepth = LakeDepth_Medium;
-      break;
-    }
+    sendOurTileInfo = true;
   }
 }
 
@@ -518,12 +542,12 @@ byte __attribute__((noinline)) randRange(byte min, byte max)
 void loop()
 {
   sendOurTileInfo = false;
-  
-  // Save our current lake depth in case it changes this loop and we need to update our neighbors
-  prevLakeDepth = tileInfo.lakeDepth;
 
   commReceive();
   detectNeighbors();
+
+  // Lake tiles recompute their depth based on received comm packets and neighbor updates
+  determineOurLakeDepth();
 
   handleUserInput();
 
@@ -538,20 +562,15 @@ void loop()
       break;
   }
 
-  if (tileInfo.tileType == TileType_Lake && tileInfo.lakeDepth != prevLakeDepth)
-  {
-    sendOurTileInfo = true;
-  }
+  checkShoreWave();
+  rippleOut();
 
-  if (sendOurTileInfo)
+  // If a command queue is empty then just send our tile info again
+  FOREACH_FACE(f)
   {
-    FOREACH_FACE(f)
+    if (commInsertionIndexes[f] == 0)
     {
-      enqueueCommOnFace(f, Command_TileType, tileInfo.tileType);
-      if (tileInfo.tileType == TileType_Lake)
-      {
-        enqueueCommOnFace(f, Command_LakeDepth, tileInfo.lakeDepth);
-      }
+      enqueueCommOnFace(f, Command_TileInfo, tileInfo.tileType | (tileInfo.lakeDepth << 2));
     }
   }
 
@@ -582,9 +601,12 @@ void detectNeighbors()
         for (byte castIndex = 0; castIndex < MAX_CASTS_PER_TILE; castIndex++)
         {
           // Need to find the player number from our list of casts
-          if (castInfo[castIndex].faceIn == f || castInfo[castIndex].faceOut == f)
+          if (castInfo[castIndex].playerNum != INVALID_PLAYER)
           {
-            breakLine(f, castInfo[castIndex].playerNum);
+            if (castInfo[castIndex].faceIn == f || castInfo[castIndex].faceOut == f)
+            {
+              breakLine(f, castInfo[castIndex].playerNum);
+            }
           }
         }
       }
@@ -600,7 +622,6 @@ void detectNeighbors()
       {
         // New neighbor
         neighborTileInfo[f].tileType = TileType_Unknown;
-        determineOurLakeDepth();
 
         // If we are a player tile then force recompute the casting info
         playerState = PlayerState_Idle;
@@ -615,17 +636,6 @@ void detectNeighbors()
     }
   }
 
-  if (numNeighborLakeTiles < FACE_COUNT)
-  {
-    // If we have an empty neighbor then we must be a shallow tile
-    tileInfo.lakeDepth = LakeDepth_Shallow;
-  }
-  else if (tileInfo.lakeDepth == LakeDepth_Shallow)
-  {
-    // Fully surrounded - stop being shallow - need to compute our depth based on our neighbors
-    tileInfo.lakeDepth = LakeDepth_Unknown;
-    determineOurLakeDepth();
-  }
 }
 
 // ----------------------------------------------------------------------------------------------------
@@ -657,6 +667,10 @@ void handleUserInput()
         playerColorIndex = 0;
       }
     }
+    else if (tileInfo.tileType == TileType_Lake)
+    {
+      startRipple();
+    }
   }
 }
 
@@ -677,7 +691,7 @@ void loop_Player()
     case PlayerState_Idle:
       {
         // Placing their tile next to the lake will make a player go into casting mode
-        // It starts out by sweeping back-and-forth between the lake tiles it is touching
+        // It starts by sweeping back-and-forth between the lake tiles that it is touching
         if (numNeighborLakeTiles > 0 && numNeighborLakeTiles <= 3)
         {
           playerState = PlayerState_GetCastAngle;
@@ -695,7 +709,7 @@ void loop_Player()
             }
           }
 
-          // Go CCW from there looking for the first face...
+          // Find the lake tile by going CCW from there...
           FOREACH_FACE(f)
           {
             byte faceTest = CCW_FROM_FACE(castFaceStart, 1);
@@ -706,7 +720,7 @@ void loop_Player()
             castFaceStart = faceTest;
           }
           
-          // ...and go CW from there looking for the last face
+          // ...and go CW from there to find the last face
           FOREACH_FACE(f)
           {
             byte faceTest = CW_FROM_FACE(castFaceEnd, 1);
@@ -1010,6 +1024,91 @@ void moveFish()
 }
 
 // ====================================================================================================
+// SHORE WAVE & RIPPLE
+// ====================================================================================================
+
+void checkShoreWave()
+{
+  // Fade the current wave - it should completely fade before the next wave starts
+  if (shoreWaveValue >= SHORE_WAVE_FADE_RATE)
+  {
+    shoreWaveValue -= SHORE_WAVE_FADE_RATE;
+  }
+  else
+  {
+    shoreWaveValue = 0;
+  }
+
+  // Check if we should start the next wave
+  if (!shoreWaveTimer.isExpired())
+  {
+    return;
+  }
+
+  // Tell neighbors that we just kicked off a wave
+  FOREACH_FACE(f)
+  {
+    if (neighborTileInfo[f].tileType == TileType_Lake && neighborTileInfo[f].lakeDepth == LakeDepth_Shallow)
+    {
+      enqueueCommOnFace(f, Command_ShoreWave, DONT_CARE);
+    }
+  }
+  shoreWaveTimer.set(SHORE_WAVE_RATE);
+  shoreWaveValue = 255;
+}
+
+void startRipple()
+{
+  if (tileInfo.tileType != TileType_Lake)
+  {
+    return;
+  }
+
+  rippleValue = 255;
+  rippleFace = INVALID_FACE;
+
+  FOREACH_FACE(f)
+  {
+    if (neighborTileInfo[f].tileType == TileType_Lake)
+    {
+      enqueueCommOnFace(f, Command_RippleOut, DONT_CARE);
+    }
+  }
+}
+
+void rippleOut()
+{
+  if (tileInfo.tileType != TileType_Lake)
+  {
+    return;
+  }
+
+  if (rippleValue == 0)
+  {
+    return;
+  }
+
+  bool maySendOut = false;
+  if (rippleFace == INVALID_FACE && rippleValue >= 192)
+  {
+    maySendOut = true;
+  }
+
+  if (rippleValue >= RIPPLE_FADE_RATE)
+  {
+    rippleValue -= RIPPLE_FADE_RATE;
+  }
+  else
+  {
+    rippleValue = 0;
+  }
+
+  if (maySendOut && rippleValue < 224)
+  {
+  }
+}
+
+// ====================================================================================================
 // RENDER
 // ====================================================================================================
 
@@ -1022,15 +1121,51 @@ void render()
   {
     case TileType_Lake:
       {
-        switch (tileInfo.lakeDepth)
+        // Base lake color
+        FOREACH_FACE(f)
         {
-          case LakeDepth_Shallow: setColor(RED); break;
-          case LakeDepth_Medium: setColor(GREEN); break;
-          case LakeDepth_Deep: setColor(BLUE); break;
-          case LakeDepth_Unknown: setColor(WHITE); break;
-          default: setColor(WHITE); break;
+          switch (tileInfo.lakeDepth)
+          {
+            case LakeDepth_Shallow:
+            {
+              color.as_uint16 = LAKE_COLOR_SHALLOW;
+
+              // Shore wave, if present
+              byte shoreWaveColor = getWaveColor(neighborTileInfo[f].tileType == TileType_Lake, shoreWaveValue);
+              lightenColor(&color, shoreWaveColor);
+            }
+              break;
+            case LakeDepth_Medium:
+              color.as_uint16 = LAKE_COLOR_MEDIUM;
+              break;
+            case LakeDepth_Deep:
+              color.as_uint16 = LAKE_COLOR_DEEP;
+              break;
+          }
+
+          if (rippleValue > 0)
+          {
+            byte rippleColor = 0;
+            if (rippleFace == INVALID_FACE)
+            {
+              rippleColor = getWaveColor(true, rippleValue);
+            }
+            else
+            {
+              byte sideFace1 = CW_FROM_FACE(f, 1);
+              byte sideFace2 = CCW_FROM_FACE(f, 1);
+
+              rippleColor = getWaveColor(rippleFace == f || rippleFace == sideFace1 || rippleFace == sideFace2, rippleValue);
+              rippleColor >>= 1;
+            }
+
+            lightenColor(&color, rippleColor);
+          }
+
+          setFaceColor(f, color);
         }
 
+        // Fish, if present
         for (byte fishIndex = 0; fishIndex < MAX_FISH_PER_TILE; fishIndex++)
         {
           if (residentFish[fishIndex].fishType != FishType_None)
@@ -1039,6 +1174,7 @@ void render()
           }
         }
 
+        // Cast line, if present
         for (byte castIndex = 0; castIndex < MAX_CASTS_PER_TILE; castIndex++)
         {
           if (castInfo[castIndex].playerNum != INVALID_PLAYER)
@@ -1065,16 +1201,18 @@ void render()
 
           case PlayerState_GetCastAngle:
             {
-              //setFaceColor(castFaceStart, BLUE);
-              //setFaceColor(castFaceEnd, YELLOW);
-
               // Light up the face in the direction the player is casting
               setFaceColor(castFace, WHITE);
 
               // The player's color goes on the opposite face
               byte otherFace = CW_FROM_FACE(castFace, 3);
-              color.as_uint16 = playerColors[playerColorIndex];
               setFaceColor(otherFace, color);
+
+              if (millis() & 0x1)
+              {
+                //setFaceColor(castFaceStart, BLUE);
+                //setFaceColor(castFaceEnd, YELLOW);
+              }
             }
             break;
 
@@ -1083,7 +1221,6 @@ void render()
               setFaceColor(castFace, WHITE);
 
               byte otherFace = CW_FROM_FACE(castFace, 3);
-              color.as_uint16 = playerColors[playerColorIndex];
               setFaceColor(otherFace, color);
 
               if (castPower < 64)
@@ -1127,4 +1264,54 @@ void render()
       setColorOnFace(MAGENTA, f);
     }
   }
+}
+
+uint8_t getWaveColor(bool firstFace, uint8_t value)
+{
+  uint8_t color = 0;
+
+  if (firstFace)
+  {
+    if (value >= 192)
+    {
+      color = (255 - value) >> 2;   // 0 - 63 :: 0 - 31
+    }
+    else if (value >= 64)
+    {
+      color = (value - 64) >> 3;   // 127 - 0 :: 31 - 0
+    }
+  }
+  else
+  {
+    if (value < 192 && value >= 128)
+    {
+      color = (191 - value) >> 2;   // 0 - 127 :: 0 - 31
+    }
+    else if (value < 128)
+    {
+      color = value >> 3;   // 127 - 0 :: 31 - 0
+    }
+  }
+
+  return color;
+}
+
+void lightenColor(Color *color, uint8_t val)
+{
+  color->r = addToColorComponent(color->r, val);
+  color->g = addToColorComponent(color->g, val);
+  color->b = addToColorComponent(color->b, val);
+}
+
+uint8_t addToColorComponent(uint8_t in, uint8_t val)
+{
+  // Color components in the pixelColor_t struct are only 5 bits
+  uint8_t sum = in + val;
+
+  if (sum < 32)
+  {
+    return sum;
+  }
+
+  return 31;
 }
