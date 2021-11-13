@@ -386,6 +386,11 @@ void processCommForFace(byte commandByte, byte value, byte f)
                 enqueueCommOnFace(castFaceOut, command, castData);  // same command since it encodes the direction
               }
             }
+            else
+            {
+              // Dropping the line here - ripple out
+              startRipple();
+            }
             break;
           }
         }
