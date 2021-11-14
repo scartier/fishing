@@ -3,10 +3,10 @@
     "configurations": [
         {
             "name": "Arduino",
-            "compilerPath": "C:\\Program Files (x86)\\Arduino\\hardware\\tools\\avr\\bin\\avr-g++",
+            "compilerPath": "C:\\Users\\Scott\\AppData\\Local\\Arduino15\\packages\\arduino\\tools\\avr-gcc\\7.3.0-atmel3.6.1-arduino5\\bin\\avr-g++",
             "compilerArgs": [
                 "-w",
-                "-std=gnu++11",
+                "-std=gnu++17",
                 "-fpermissive",
                 "-fno-exceptions",
                 "-ffunction-sections",
@@ -16,18 +16,18 @@
             ],
             "intelliSenseMode": "gcc-x64",
             "includePath": [
-                "C:\\Users\\Scott\\Documents\\Arduino\\hardware\\Blinks-SDK-1.1.0-GM\\avr\\cores\\blinklib",
-                "C:\\Users\\Scott\\Documents\\Arduino\\hardware\\Blinks-SDK-1.1.0-GM\\avr\\variants\\standard",
+                "C:\\Users\\Scott\\AppData\\Local\\Arduino15\\packages\\blinklib\\hardware\\avr\\1.4.3\\cores\\blinklib",
+                "C:\\Users\\Scott\\AppData\\Local\\Arduino15\\packages\\blinklib\\hardware\\avr\\1.4.3\\variants\\standard",
                 "C:\\Program Files (x86)\\Arduino\\libraries\\CommLib",
-                "c:\\program files (x86)\\arduino\\hardware\\tools\\avr\\lib\\gcc\\avr\\7.3.0\\include",
-                "c:\\program files (x86)\\arduino\\hardware\\tools\\avr\\lib\\gcc\\avr\\7.3.0\\include-fixed",
-                "c:\\program files (x86)\\arduino\\hardware\\tools\\avr\\avr\\include"
+                "c:\\users\\scott\\appdata\\local\\arduino15\\packages\\arduino\\tools\\avr-gcc\\7.3.0-atmel3.6.1-arduino5\\lib\\gcc\\avr\\7.3.0\\include",
+                "c:\\users\\scott\\appdata\\local\\arduino15\\packages\\arduino\\tools\\avr-gcc\\7.3.0-atmel3.6.1-arduino5\\lib\\gcc\\avr\\7.3.0\\include-fixed",
+                "c:\\users\\scott\\appdata\\local\\arduino15\\packages\\arduino\\tools\\avr-gcc\\7.3.0-atmel3.6.1-arduino5\\avr\\include"
             ],
             "forcedInclude": [
-                "C:\\Users\\Scott\\Documents\\Arduino\\hardware\\Blinks-SDK-1.1.0-GM\\avr\\cores\\blinklib\\Arduino.h"
+                "C:\\Users\\Scott\\AppData\\Local\\Arduino15\\packages\\blinklib\\hardware\\avr\\1.4.3\\cores\\blinklib\\Arduino.h"
             ],
             "cStandard": "c11",
-            "cppStandard": "c++11",
+            "cppStandard": "c++17",
             "defines": [
                 "F_CPU=8000000L",
                 "ARDUINO=10815",
