@@ -1306,12 +1306,28 @@ void render()
           case PlayerState_GetCastAngle:
           case PlayerState_Casting:
             {
-              // Light up the face in the direction the player is casting
-              setFaceColor(castFace, WHITE);
-
               // The player's color goes on the opposite face
               byte otherFace = CW_FROM_FACE(castFace, 3);
               setFaceColor(otherFace, color);
+
+              // Light up the face in the direction the player is casting
+              // Give a bit of a blur with the sides to show the analog nature of the sweep
+              if (castAngle < 128)
+              {
+                otherFace = CCW_FROM_FACE(castFace, 1);
+                color = makeColorRGB(128, 128, 128);
+                setFaceColor(otherFace, color);
+                //color = makeColorRGB(128 + castAngle, 128 + castAngle, 128 + castAngle);
+                //setFaceColor(castFace, color);
+              }
+              else
+              {
+                otherFace = CW_FROM_FACE(castFace, 1);
+                color = makeColorRGB(128, 128, 128);
+                setFaceColor(otherFace, color);
+                //color = makeColorRGB(128 + (255 - castAngle), 128 + (255 - castAngle), 128 + (255 - castAngle));
+              }
+              setFaceColor(castFace, WHITE);
 
               if (millis() & 0x1)
               {
