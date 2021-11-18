@@ -1,5 +1,8 @@
 #include <commlib.h>
 
+#define ENABLE_LAKE_TILE
+//#define ENABLE_FISHERFOLK_TILE
+
 byte faceOffsetArray[] = { 0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5 };
 
 #define CCW_FROM_FACE(f, amt) faceOffsetArray[6 + (f) - (amt)]
@@ -25,12 +28,6 @@ byte sponge[220];
 
 // ----------------------------------------------------------------------------------------------------
 
-uint8_t NO_INLINE getWaveColor(bool firstFace, uint8_t value);
-void NO_INLINE lightenColor(Color *color, uint8_t val);
-uint8_t NO_INLINE addToColorComponent(uint8_t in, uint8_t val);
-
-// ----------------------------------------------------------------------------------------------------
-
 uint32_t randState = 123;
 
 // ----------------------------------------------------------------------------------------------------
@@ -45,6 +42,9 @@ enum TileType : uint8_t
 
 // ----------------------------------------------------------------------------------------------------
 // LAKE
+
+#ifdef ENABLE_LAKE_TILE
+
 #define LAKE_COLOR_SHALLOW  RGB_TO_U16(  0, 128, 128 )
 #define LAKE_COLOR_MEDIUM   RGB_TO_U16(  0,   0, 128 )
 #define LAKE_COLOR_DEEP     RGB_TO_U16(  0,   0,  64 )
@@ -57,8 +57,12 @@ enum LakeDepth : uint8_t
   LakeDepth_Deep,
 };
 
+#endif  // ENABLE_LAKE_TILE
+
 // ----------------------------------------------------------------------------------------------------
 // FISH
+
+#ifdef ENABLE_LAKE_TILE
 
 #define FISH_SPAWN_RATE_MIN (5000>>7)
 #define FISH_SPAWN_RATE_MAX (10000>>7)
@@ -69,6 +73,8 @@ byte fishMoveTargetTiles[FACE_COUNT];
 
 #define BROADCAST_DELAY_RATE 1000
 Timer broadcastDelay;
+
+#endif  // ENABLE_LAKE_TILE
 
 enum FishSize : uint8_t
 {
@@ -91,6 +97,8 @@ union FishTypeUnion
   uint8_t rawBits;
 };
 
+#ifdef ENABLE_LAKE_TILE
+
 struct FishInfo
 {
   FishType fishType;
@@ -105,11 +113,14 @@ struct FishInfo
 #define FISH_MOVE_RATE_PAUSE 3000
 
 #define MAX_FISH_PER_TILE 3
-#define INVALID_FISH 15
 FishInfo residentFish[MAX_FISH_PER_TILE];
+
+#endif  // ENABLE_LAKE_TILE
 
 // ----------------------------------------------------------------------------------------------------
 // FISH VISUALS
+
+#ifdef ENABLE_FISHERFOLK_TILE
 
 enum FishDisplay
 {
@@ -142,8 +153,12 @@ struct CaughtFishInfo
 #define MAX_CAUGHT_FISH 6
 CaughtFishInfo caughtFishInfo[MAX_CAUGHT_FISH];
 
+#endif // ENABLE_FISHERFOLK_TILE
+
 // ----------------------------------------------------------------------------------------------------
 // FISH MOVEMENT
+
+#ifdef ENABLE_LAKE_TILE
 
 byte nextMoveFaceArray[6][6] =
 {
@@ -155,23 +170,25 @@ byte nextMoveFaceArray[6][6] =
   { 5, 0, 3, 4, 5, 5 }, // Dest face 5 - 50/50 CW
 };
 
+#endif  // ENABLE_LAKE_TILE
+
 // ----------------------------------------------------------------------------------------------------
 // TILE
 
 struct TileInfo
 {
   TileType tileType;
-  LakeDepth lakeDepth;
+  byte lakeDepth;
 };
 
 TileInfo tileInfo;
-LakeDepth prevLakeDepth;
 TileInfo neighborTileInfo[FACE_COUNT];
-bool sendOurTileInfo = false;
 byte numNeighborLakeTiles = 0;
 
 // ----------------------------------------------------------------------------------------------------
 // PLAYER
+
+#ifdef ENABLE_FISHERFOLK_TILE
 
 #define MAX_PLAYER_COLORS 7
 uint16_t playerColors[] =
@@ -197,8 +214,12 @@ enum PlayerState
 };
 PlayerState playerState = PlayerState_Idle;
 
+#endif // ENABLE_FISHERFOLK_TILE
+
 // ----------------------------------------------------------------------------------------------------
 // CASTING
+
+#ifdef ENABLE_FISHERFOLK_TILE
 
 #define CAST_ANGLE_SWEEP_INC 10
 byte castFaceStart, castFaceEnd;
@@ -216,6 +237,8 @@ enum CastSweepDirection
 };
 CastSweepDirection castSweepDirection;    // true = forward, false = backward
 
+#endif // ENABLE_FISHERFOLK_TILE
+
 struct CastInfo
 {
   byte faceIn;      // the face where the line enters from the player
@@ -226,16 +249,18 @@ struct CastInfo
 #define INVALID_CAST 15
 CastInfo castInfo[MAX_CASTS_PER_TILE];
 
+#define MAX_CAST_ANGLES 5
+#define MAX_CAST_STEPS 3
+#define MAX_CAST_POWERS 4
+
+#ifdef ENABLE_LAKE_TILE
 enum CastStep
 {
-  CastStep_Left     = 2,    // the value is the number of faces to go CW from the entry face
+  CastStep_Left     = 2,    // the value is the number of faces CW from the entry face
   CastStep_Straight = 3,
   CastStep_Right    = 4,
 };
 
-#define MAX_CAST_ANGLES 5
-#define MAX_CAST_STEPS 3
-#define MAX_CAST_POWERS 4
 CastStep castSteps[MAX_CAST_ANGLES][MAX_CAST_STEPS] =
 {
   { CastStep_Left,      CastStep_Right,     CastStep_Left     },
@@ -245,6 +270,8 @@ CastStep castSteps[MAX_CAST_ANGLES][MAX_CAST_STEPS] =
   { CastStep_Right,     CastStep_Left,      CastStep_Right    }
 };
 
+#endif  // ENABLE_LAKE_TILE
+
 byte powerToAngle[MAX_CAST_POWERS][MAX_CAST_ANGLES] =
 {
   { 255, 255, 255, 255, 255 },  // doesn't matter which one is selected
@@ -253,10 +280,17 @@ byte powerToAngle[MAX_CAST_POWERS][MAX_CAST_ANGLES] =
   {  32,  96, 160, 224, 255 },
 };
 
+
+#ifdef ENABLE_FISHERFOLK_TILE
+
 #define REEL_BUTTON_DURATION 1000
 Timer reelTimer;
 
+#endif // ENABLE_FISHERFOLK_TILE
+
 // ----------------------------------------------------------------------------------------------------
+
+#ifdef ENABLE_LAKE_TILE
 
 #define SHORE_WAVE_RATE 10000
 Timer shoreWaveTimer;
@@ -264,11 +298,17 @@ Timer shoreWaveTimer;
 #define SHORE_WAVE_FADE_RATE 2
 byte shoreWaveValue = 0;
 
+#endif  // ENABLE_LAKE_TILE
+
 // ----------------------------------------------------------------------------------------------------
+
+#ifdef ENABLE_LAKE_TILE
 
 #define RIPPLE_FADE_RATE 4
 byte rippleValue = 0;
 byte rippleFace = INVALID_FACE;   // INVALID_FACE means we originated the ripple
+
+#endif  // ENABLE_LAKE_TILE
 
 // ----------------------------------------------------------------------------------------------------
 
@@ -328,13 +368,18 @@ void setup()
 
   randState=serial_num_32;
 
+#ifdef ENABLE_LAKE_TILE
   resetLakeTile();
+#else
+  resetPlayerTile();
+#endif
 }
 
 // ----------------------------------------------------------------------------------------------------
 
 void resetLakeTile()
 {
+#ifdef ENABLE_LAKE_TILE
   tileInfo.tileType = TileType_Lake;
   tileInfo.lakeDepth = LakeDepth_Unknown;
 
@@ -346,6 +391,7 @@ void resetLakeTile()
   {
     residentFish[fish].fishType.size = FishSize_None;
   }
+#endif  // ENABLE_LAKE_TILE
 
   // Reset the list of casts through this tile
   for (byte castIndex = 0; castIndex < MAX_CASTS_PER_TILE; castIndex++)
@@ -356,11 +402,13 @@ void resetLakeTile()
 
 // ----------------------------------------------------------------------------------------------------
 
+#ifdef ENABLE_FISHERFOLK_TILE
 void resetPlayerTile()
 {
   tileInfo.tileType = TileType_Player;
   playerState = PlayerState_Idle;
 }
+#endif  // ENABLE_FISHERFOLK_TILE
 
 // ====================================================================================================
 // COMMUNICATION
@@ -377,12 +425,16 @@ void processCommForFace(byte commandByte, byte value, byte f)
     case Command_TileInfo:
       if (neighborTileInfo[f].tileType != (TileType) (value & 0x3))
       {
+#ifdef ENABLE_FISHERFOLK_TILE
         // Force the player to recompute casting info
         playerState = PlayerState_Idle;
+#endif
       }
       neighborTileInfo[f].tileType  = (TileType) (value & 0x3);
-      neighborTileInfo[f].lakeDepth = (LakeDepth) (value >> 2);
+      neighborTileInfo[f].lakeDepth = value >> 2;
       break;
+
+#ifdef ENABLE_LAKE_TILE
 
     case Command_FishSpawned:
       if (tileInfo.tileType == TileType_Lake)
@@ -508,7 +560,9 @@ void processCommForFace(byte commandByte, byte value, byte f)
         }
       }
       break;
-      
+
+#endif  // ENABLE_LAKE_TILE
+
     case Command_LineAction:
       {
         switch (value)
@@ -517,6 +571,7 @@ void processCommForFace(byte commandByte, byte value, byte f)
             breakLine(f);
             break;
 
+#ifdef ENABLE_LAKE_TILE
           case LineAction_Tug:
           case LineAction_Reel:
             for (byte castIndex = 0; castIndex < MAX_CASTS_PER_TILE; castIndex++)
@@ -547,11 +602,13 @@ void processCommForFace(byte commandByte, byte value, byte f)
               }
             }
             break;
+#endif  // ENABLE_LAKE_TILE
 
           case LineAction_DoneReeling:
             // Line was reeled into this tile
             if (tileInfo.tileType == TileType_Lake)
             {
+#ifdef ENABLE_LAKE_TILE
               // If we're a lake tile then shorten the line by one
               for (byte castIndex = 0; castIndex < MAX_CASTS_PER_TILE; castIndex++)
               {
@@ -560,17 +617,21 @@ void processCommForFace(byte commandByte, byte value, byte f)
                   castInfo[castIndex].faceOut = INVALID_FACE;
                 }
               }
+#endif  // ENABLE_LAKE_TILE
             }
+#ifdef ENABLE_FISHERFOLK_TILE
             else if (tileInfo.tileType == TileType_Player)
             {
               // If we're a player then the fish was caught!
               caughtFish();
             }
+#endif  // ENABLE_FISHERFOLK_TILE
             break;
         }
       }
       break;
 
+#ifdef ENABLE_LAKE_TILE
     case Command_LakeFX:
       {
         switch (value)
@@ -590,6 +651,7 @@ void processCommForFace(byte commandByte, byte value, byte f)
         }
       }
       break;
+#endif  // ENABLE_LAKE_TILE
 
     case Command_FishHooked:
       {
@@ -601,11 +663,13 @@ void processCommForFace(byte commandByte, byte value, byte f)
           {
             castInfo[castIndex].fishType.rawBits = value;
 
+#ifdef ENABLE_LAKE_TILE
             // If we're a lake tile, pass it on up the line
             if (tileInfo.tileType != TileType_Player)
             {
               enqueueCommOnFace(castInfo[castIndex].faceIn, Command_FishHooked, value);
             }
+#endif  // ENABLE_LAKE_TILE
             break;
           }
         }
@@ -619,6 +683,7 @@ void processCommForFace(byte commandByte, byte value, byte f)
 
 void breakLine(byte sourceFace)
 {
+#ifdef ENABLE_FISHERFOLK_TILE
   // If a player receives this then their line was broken and they should go back to idle
   if (tileInfo.tileType == TileType_Player)
   {
@@ -626,8 +691,10 @@ void breakLine(byte sourceFace)
     castInfo[0].faceOut = INVALID_FACE;
     return;
   }
+#endif  // ENABLE_FISHERFOLK_TILE
 
-  // Use player number and face to match the entry in our castInfo array
+#ifdef ENABLE_LAKE_TILE
+  // Use face to match the entry in our castInfo array
   for (byte castIndex = 0; castIndex < MAX_CASTS_PER_TILE; castIndex++)
   {
     if (sourceFace == castInfo[castIndex].faceIn)
@@ -661,10 +728,12 @@ void breakLine(byte sourceFace)
       castInfo[castIndex].faceIn = INVALID_FACE;
     }
   }
+#endif  // ENABLE_LAKE_TILE
 }
 
 // ----------------------------------------------------------------------------------------------------
 
+#ifdef ENABLE_FISHERFOLK_TILE
 void caughtFish()
 {
   // Find a spot in our bag for the fish
@@ -681,9 +750,11 @@ void caughtFish()
     playerState = PlayerState_Idle;
   }
 }
+#endif  // ENABLE_FISHERFOLK_TILE
 
 // ----------------------------------------------------------------------------------------------------
 
+#ifdef ENABLE_LAKE_TILE
 void determineOurLakeDepth()
 {
   if (tileInfo.tileType != TileType_Lake)
@@ -691,9 +762,6 @@ void determineOurLakeDepth()
     return;
   }
   
-  // Save our current lake depth in case it changes this loop and we need to update our neighbors
-  prevLakeDepth = tileInfo.lakeDepth;
-
   // If we have an empty neighbor then we must be a shallow tile
   if (numNeighborLakeTiles < FACE_COUNT)
   {
@@ -717,29 +785,16 @@ void determineOurLakeDepth()
       }
     }
   }
-
-  // If our depth changed then notify our neighbors
-  if (tileInfo.lakeDepth != prevLakeDepth)
-  {
-    sendOurTileInfo = true;
-  }
 }
-
-// ----------------------------------------------------------------------------------------------------
-
-// ----------------------------------------------------------------------------------------------------
+#endif  // ENABLE_LAKE_TILE
 
 // ====================================================================================================
 // UTILITY
 // ====================================================================================================
 
-// ----------------------------------------------------------------------------------------------------
-
-// ----------------------------------------------------------------------------------------------------
-
 // Random code partially copied from blinklib because there's no function
 // to set an explicit seed.
-byte NO_INLINE randGetByte()
+byte randGetByte()
 {
   // Algorithm "xor" from p. 4 of Marsaglia, "Xorshift RNGs"
   uint32_t x = randState;
@@ -753,7 +808,7 @@ byte NO_INLINE randGetByte()
 // ----------------------------------------------------------------------------------------------------
 
 // MIN inclusive, MAX not inclusive
-byte NO_INLINE randRange(byte min, byte max)
+byte randRange(byte min, byte max)
 {
   byte val = randGetByte();
   byte range = max - min;
@@ -767,29 +822,35 @@ byte NO_INLINE randRange(byte min, byte max)
 
 void loop()
 {
-  sendOurTileInfo = false;
-
   commReceive();
   detectNeighbors();
 
+#ifdef ENABLE_LAKE_TILE
   // Lake tiles recompute their depth based on received comm packets and neighbor updates
   determineOurLakeDepth();
+#endif  // ENABLE_LAKE_TILE
 
   handleUserInput();
 
   switch (tileInfo.tileType)
   {
+#ifdef ENABLE_LAKE_TILE
     case TileType_Lake:
       loop_Lake();
       break;
+#endif  // ENABLE_LAKE_TILE
 
+#ifdef ENABLE_FISHERFOLK_TILE
     case TileType_Player:
       loop_Player();
       break;
+#endif // ENABLE_FISHERFOLK_TILE
   }
 
+#ifdef ENABLE_LAKE_TILE
   checkShoreWave();
   rippleOut();
+#endif  // ENABLE_LAKE_TILE
 
   // If a command queue is empty then just send our tile info again
   FOREACH_FACE(f)
@@ -820,13 +881,14 @@ void detectNeighbors()
       // Was neighbor just removed?
       if (neighborTileInfo[f].tileType != TileType_NotPresent)
       {
+#ifdef ENABLE_FISHERFOLK_TILE
         // If we are a player tile then force recompute the casting info
         playerState = PlayerState_Idle;
+#endif  // ENABLE_FISHERFOLK_TILE
 
         // Removing the source of a cast breaks the line
         for (byte castIndex = 0; castIndex < MAX_CASTS_PER_TILE; castIndex++)
         {
-          // Need to find the player number from our list of casts
           if (castInfo[castIndex].faceIn != INVALID_FACE)
           {
             if (castInfo[castIndex].faceIn == f || castInfo[castIndex].faceOut == f)
@@ -849,11 +911,10 @@ void detectNeighbors()
         // New neighbor
         neighborTileInfo[f].tileType = TileType_Unknown;
 
+#ifdef ENABLE_FISHERFOLK_TILE
         // If we are a player tile then force recompute the casting info
         playerState = PlayerState_Idle;
-
-        // Force us to send out our tile info to the new neighbor
-        sendOurTileInfo = true;
+#endif  // ENABLE_FISHERFOLK_TILE
       }
       else if (neighborTileInfo[f].tileType == TileType_Lake)
       {
@@ -868,7 +929,9 @@ void detectNeighbors()
 
 void handleUserInput()
 {
-    // Swap between player tile and lake tile with triple click
+#ifdef ENABLE_FISHERFOLK_TILE
+#ifdef ENABLE_LAKE_TILE
+  // Swap between player tile and lake tile with triple click
   if (buttonMultiClicked() && buttonClickCount() == 3)
   {
     if (tileInfo.tileType == TileType_Lake)
@@ -879,13 +942,15 @@ void handleUserInput()
     {
       resetLakeTile();
     }
-    sendOurTileInfo = true;
     return;
   }
+#endif  // ENABLE_LAKE_TILE
+#endif  // ENABLE_FISHERFOLK_TILE
 }
 
 // ----------------------------------------------------------------------------------------------------
 
+#ifdef ENABLE_LAKE_TILE
 void loop_Lake()
 {
   tryToSpawnFish();
@@ -896,9 +961,11 @@ void loop_Lake()
     startRipple();
   }
 }
+#endif  // ENABLE_LAKE_TILE
 
 // ----------------------------------------------------------------------------------------------------
 
+#ifdef ENABLE_FISHERFOLK_TILE
 void loop_Player()
 {
   switch (playerState)
@@ -1107,15 +1174,13 @@ void loop_Player()
       break;
   }
 }
-
-// ----------------------------------------------------------------------------------------------------
-
-// ----------------------------------------------------------------------------------------------------
+#endif  // ENABLE_FISHERFOLK_TILE
 
 // ====================================================================================================
 // FISH
 // ====================================================================================================
 
+#ifdef ENABLE_LAKE_TILE
 void resetSpawnTimer()
 {
   byte spawnDelay = randRange(FISH_SPAWN_RATE_MIN, FISH_SPAWN_RATE_MAX);
@@ -1304,10 +1369,13 @@ void moveFish()
     }
   }
 }
+#endif // ENABLE_LAKE_TILE
 
 // ====================================================================================================
 // SHORE WAVE & RIPPLE
 // ====================================================================================================
+
+#ifdef ENABLE_LAKE_TILE
 
 void checkShoreWave()
 {
@@ -1339,6 +1407,8 @@ void checkShoreWave()
   shoreWaveValue = 255;
 }
 
+// ----------------------------------------------------------------------------------------------------
+
 void startRipple()
 {
   if (tileInfo.tileType != TileType_Lake)
@@ -1357,6 +1427,8 @@ void startRipple()
     }
   }
 }
+
+// ----------------------------------------------------------------------------------------------------
 
 void rippleOut()
 {
@@ -1390,6 +1462,8 @@ void rippleOut()
   }
 }
 
+#endif  // ENABLE_LAKE_TILE
+
 // ====================================================================================================
 // RENDER
 // ====================================================================================================
@@ -1401,6 +1475,7 @@ void render()
 
   switch (tileInfo.tileType)
   {
+#ifdef ENABLE_LAKE_TILE
     case TileType_Lake:
       {
         // Base lake color
@@ -1482,7 +1557,9 @@ void render()
         }
       }
       break;
+#endif // ENABLE_LAKE_TILE
 
+#ifdef ENABLE_FISHERFOLK_TILE
     case TileType_Player:
       {
         color.as_uint16 = playerColors[playerColorIndex];
@@ -1576,6 +1653,7 @@ void render()
         }
       }
       break;
+#endif  // ENABLE_FISHERFOLK_TILE
 
     default:
       setColor(WHITE);
@@ -1591,7 +1669,8 @@ void render()
   }
 }
 
-uint8_t NO_INLINE getWaveColor(bool firstFace, uint8_t value)
+#ifdef ENABLE_LAKE_TILE
+uint8_t getWaveColor(bool firstFace, uint8_t value)
 {
   uint8_t color = 0;
 
@@ -1621,14 +1700,14 @@ uint8_t NO_INLINE getWaveColor(bool firstFace, uint8_t value)
   return color;
 }
 
-void NO_INLINE lightenColor(Color *color, uint8_t val)
+void lightenColor(Color *color, uint8_t val)
 {
   color->r = addToColorComponent(color->r, val);
   color->g = addToColorComponent(color->g, val);
   color->b = addToColorComponent(color->b, val);
 }
 
-uint8_t NO_INLINE addToColorComponent(uint8_t in, uint8_t val)
+uint8_t addToColorComponent(uint8_t in, uint8_t val)
 {
   uint8_t sum = in + val;
 
@@ -1640,3 +1719,4 @@ uint8_t NO_INLINE addToColorComponent(uint8_t in, uint8_t val)
 
   return 31;
 }
+#endif // ENABLE_LAKE_TILE
