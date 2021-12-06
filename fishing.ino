@@ -1,7 +1,7 @@
 #include <commlib.h>
 
-#define ENABLE_LAKE_TILE
-//#define ENABLE_FISHERFOLK_TILE
+//#define ENABLE_LAKE_TILE
+#define ENABLE_FISHERFOLK_TILE
 
 byte faceOffsetArray[] = { 0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5 };
 
@@ -101,7 +101,7 @@ union FishTypeUnion
 
 struct FishInfo
 {
-  FishType fishType;
+  FishTypeUnion fishType;
   byte evasion;
   byte curFace;
   Timer moveTimer;
@@ -113,6 +113,7 @@ struct FishInfo
 #define FISH_MOVE_RATE_PAUSE 3000
 
 #define MAX_FISH_PER_TILE 3
+#define INVALID_FISH (MAX_FISH_PER_TILE+1)
 FishInfo residentFish[MAX_FISH_PER_TILE];
 
 #endif  // ENABLE_LAKE_TILE
@@ -169,6 +170,11 @@ byte nextMoveFaceArray[6][6] =
   { 5, 0, 3, 4, 4, 4 }, // Dest face 4 - 50/50 CCW
   { 5, 0, 3, 4, 5, 5 }, // Dest face 5 - 50/50 CW
 };
+
+byte tugFace = INVALID_FACE;   // neighbor face that originated a tug
+#define TUG_REPEAT_RATE 2000    // minimum time between tugs or else fish get scared
+Timer tugRepeatTimer;
+bool tugScare = false;
 
 #endif  // ENABLE_LAKE_TILE
 
@@ -239,11 +245,28 @@ CastSweepDirection castSweepDirection;    // true = forward, false = backward
 
 #endif // ENABLE_FISHERFOLK_TILE
 
+#define FISH_STRUGGLE_DURATION  2000
+#define FISH_STRUGGLE_DELAY     5000
+
+enum CastState : uint8_t
+{
+  CastState_Empty,
+  CastState_Casting,
+  CastState_Present,
+  CastState_PulsingToHook,
+  CastState_PulsingToPlayer,
+  CastState_Breaking,
+};
+
 struct CastInfo
 {
-  byte faceIn;      // the face where the line enters from the player
-  byte faceOut;     // the face where the line exits towards the lake (INVALID if there is no exit)
-  FishTypeUnion fishType;// type of fish on the hook
+  CastState castState;
+  byte faceIn;            // the face where the line enters from the player
+  byte faceOut;           // the face where the line exits towards the lake (INVALID if there is no exit)
+  FishTypeUnion fishType; // type of fish on the hook
+  bool escaping;          // the fish is trying to escape (tug to cancel before timer expires)
+  Timer escapeTimer;      // time until fish escapes
+  bool debug;
 };
 #define MAX_CASTS_PER_TILE 4
 #define INVALID_CAST 15
@@ -254,6 +277,7 @@ CastInfo castInfo[MAX_CASTS_PER_TILE];
 #define MAX_CAST_POWERS 4
 
 #ifdef ENABLE_LAKE_TILE
+
 enum CastStep
 {
   CastStep_Left     = 2,    // the value is the number of faces CW from the entry face
@@ -324,6 +348,7 @@ enum LakeFX : uint8_t
 {
   LakeFX_ShoreWave,         // Periodic wave that laps on the shore tiles
   LakeFX_Ripple,            // Wave that ripples out when a cast drops in (or the player clicks the lake)
+  LakeFX_Lure,              // When player tugs the line, causes a ripple and possibly luring nearby fish closer
 };
 
 enum Command : uint8_t
@@ -389,7 +414,7 @@ void resetLakeTile()
   // Reset the list of fish in this tile
   for (byte fish = 0; fish < MAX_FISH_PER_TILE; fish++)
   {
-    residentFish[fish].fishType.size = FishSize_None;
+    residentFish[fish].fishType.type.size = FishSize_None;
   }
 #endif  // ENABLE_LAKE_TILE
 
@@ -457,12 +482,12 @@ void processCommForFace(byte commandByte, byte value, byte f)
       // Check if we have room for this fish
       for (byte fishIndex = 0; fishIndex < MAX_FISH_PER_TILE; fishIndex++)
       {
-        if (residentFish[fishIndex].fishType.size == FishSize_None)
+        if (residentFish[fishIndex].fishType.type.size == FishSize_None)
         {
           // Found an empty slot for a fish
           // Accept the fish and assign it a random destination
           enqueueCommOnFace(f, Command_FishAccepted, value);
-          residentFish[fishIndex].fishType.size = FishSize_Small;
+          residentFish[fishIndex].fishType.rawBits = value;
           residentFish[fishIndex].curFace = f;
           assignFishMoveTarget(fishIndex);
           residentFish[fishIndex].moveTimer.set(FISH_MOVE_RATE_NORMAL);
@@ -472,11 +497,26 @@ void processCommForFace(byte commandByte, byte value, byte f)
       break;
 
     case Command_FishAccepted:
-      // Neighbor tile accepted our request to give them our fish
-      // Remove the fish from our list
-      if (residentFish[value].fishType.size != FishSize_None)
       {
-        residentFish[value].fishType.size = FishSize_None;
+        // Neighbor tile accepted our request to give them our fish
+        // Remove the fish from our list
+        byte fishMatchIndex = INVALID_FISH;
+        for (byte fishIndex = 0; fishIndex < MAX_FISH_PER_TILE; fishIndex++)
+        {
+          if (residentFish[fishIndex].fishType.rawBits == value)
+          {
+            fishMatchIndex = fishIndex;
+            if (residentFish[fishIndex].curFace == f)
+            {
+              // Found a matching fish within the face we are expecting it to be - donezo
+              break;
+            }
+          }
+        }
+        if (fishMatchIndex != INVALID_FISH)
+        {
+          residentFish[fishMatchIndex].fishType.type.size = FishSize_None;
+        }
       }
       break;
 
@@ -546,7 +586,7 @@ void processCommForFace(byte commandByte, byte value, byte f)
               else
               {
                 // Dropping the line here - ripple out
-                startRipple();
+                startRipple(false);
               }
               break;
             }
@@ -583,15 +623,34 @@ void processCommForFace(byte commandByte, byte value, byte f)
                   // End of the line - do the tug/reel
                   if (value == LineAction_Tug)
                   {
-                    startRipple();
+                    if (castInfo[castIndex].fishType.type.size == FishSize_None)
+                    {
+                      startRipple(true);
+                    }
+                    else
+                    {
+                      if (castInfo[castIndex].escaping)
+                      {
+                        castInfo[castIndex].escaping = false;
+                        castInfo[castIndex].escapeTimer.set(FISH_STRUGGLE_DELAY);
+                      }
+                    }
                   }
                   else if (value == LineAction_Reel)
                   {
-                    // Tell the previous tile that they are now the end (or tell player the fish is caught)
-                    enqueueCommOnFace(castInfo[castIndex].faceIn, Command_LineAction, LineAction_DoneReeling);
+                    // If the fish is in the process of escaping, reeling causes it to escape
+                    if (castInfo[castIndex].escaping)
+                    {
+                      fishEscaped(&castInfo[castIndex]);
+                    }
+                    else
+                    {
+                      // Tell the previous tile that they are now the end (or tell player the fish is caught)
+                      enqueueCommOnFace(castInfo[castIndex].faceIn, Command_LineAction, LineAction_DoneReeling);
 
-                    // Remove the cast from this tile
-                    castInfo[castIndex].faceIn = INVALID_FACE;
+                      // Remove the cast from this tile
+                      castInfo[castIndex].faceIn = INVALID_FACE;
+                    }
                   }
                 }
                 else
@@ -605,25 +664,38 @@ void processCommForFace(byte commandByte, byte value, byte f)
 #endif  // ENABLE_LAKE_TILE
 
           case LineAction_DoneReeling:
+#ifdef ENABLE_LAKE_TILE
             // Line was reeled into this tile
             if (tileInfo.tileType == TileType_Lake)
             {
-#ifdef ENABLE_LAKE_TILE
               // If we're a lake tile then shorten the line by one
               for (byte castIndex = 0; castIndex < MAX_CASTS_PER_TILE; castIndex++)
               {
                 if (castInfo[castIndex].faceOut == f)
                 {
                   castInfo[castIndex].faceOut = INVALID_FACE;
+
+                  // Assuming the fish is not escaping
+                  castInfo[castIndex].escaping = false;
+                  castInfo[castIndex].escapeTimer.set(FISH_STRUGGLE_DELAY);
+
+                  // Randomly put the fish into escape mode
+                  letFishStartEscaping(&castInfo[castIndex]);
                 }
               }
-#endif  // ENABLE_LAKE_TILE
             }
+#endif  // ENABLE_LAKE_TILE
+
 #ifdef ENABLE_FISHERFOLK_TILE
-            else if (tileInfo.tileType == TileType_Player)
+            if (tileInfo.tileType == TileType_Player)
             {
-              // If we're a player then the fish was caught!
-              caughtFish();
+              // If we have a fish on the hook then the fish was caught!
+              if (castInfo[0].faceOut == f && castInfo[0].fishType.type.size != FishSize_None)
+              {
+                caughtFish();
+              }
+
+              playerState = PlayerState_Idle;
             }
 #endif  // ENABLE_FISHERFOLK_TILE
             break;
@@ -644,6 +716,15 @@ void processCommForFace(byte commandByte, byte value, byte f)
             }
             break;
 
+          case LakeFX_Lure:
+            // Player tugged the line to lure nearby fish
+
+            // TODO : Only work if there's a fish present
+            
+            tugFace = f;
+            tugScare = !tugRepeatTimer.isExpired();
+            tugRepeatTimer.set(TUG_REPEAT_RATE);
+            // fall through to also do a ripple...
           case LakeFX_Ripple:
             rippleFace = f;
             rippleValue = 255;
@@ -678,6 +759,18 @@ void processCommForFace(byte commandByte, byte value, byte f)
       break;
   }
 }
+
+// ----------------------------------------------------------------------------------------------------
+
+#ifdef ENABLE_LAKE_TILE
+void fishEscaped(CastInfo *castInfo)
+{
+  // Propagate the break up the line
+  // Do this before calling breakLine() since it clears faceIn
+  enqueueCommOnFace(castInfo->faceIn, Command_LineAction, LineAction_Break);
+  breakLine(castInfo->faceIn);
+}
+#endif
 
 // ----------------------------------------------------------------------------------------------------
 
@@ -746,8 +839,6 @@ void caughtFish()
 
     // Save the fish in our bag!
     caughtFishInfo[fishIndex].fishType = castInfo[0].fishType.type;
-
-    playerState = PlayerState_Idle;
   }
 }
 #endif  // ENABLE_FISHERFOLK_TILE
@@ -955,10 +1046,11 @@ void loop_Lake()
 {
   tryToSpawnFish();
   moveFish();
+  fishStruggle();
 
   if (buttonSingleClicked())
   {
-    startRipple();
+    startRipple(false);
   }
 }
 #endif  // ENABLE_LAKE_TILE
@@ -1158,6 +1250,12 @@ void loop_Player()
           enqueueCommOnFace(castFace, Command_LineAction, LineAction_Tug);
         }
         
+        if (buttonLongPressed())
+        {
+          enqueueCommOnFace(castFace, Command_LineAction, LineAction_Reel);
+        }
+        
+        /*
         if (buttonPressed())
         {
           reelTimer.set(REEL_BUTTON_DURATION);
@@ -1167,9 +1265,10 @@ void loop_Player()
           if (reelTimer.isExpired())
           {
             enqueueCommOnFace(castFace, Command_LineAction, LineAction_Reel);
-            reelTimer.set(REEL_BUTTON_DURATION);
+            reelTimer.set(REEL_BUTTON_DURATION * 2);
           }
         }
+        */
       }
       break;
   }
@@ -1216,20 +1315,21 @@ void tryToSpawnFish()
     return;
   }
 
-  // Don't spawn if there's already a fish here
+  // Don't spawn if there's already a fish in this tile
   for (byte fishIndex = 0; fishIndex < MAX_FISH_PER_TILE; fishIndex++)
   {
-    if (residentFish[fishIndex].fishType.size != FishSize_None)
+    if (residentFish[fishIndex].fishType.type.size != FishSize_None)
     {
       return;
     }
   }
 
-  // Spawn the fish in the first slot
+  // Spawn the fish in the first slot (guaranteed to be empty)
   byte fishIndex = 0;
 
   numFishToSpawn--;
-  residentFish[fishIndex].fishType.size = FishSize_Small;
+  residentFish[fishIndex].fishType.type.size = (FishSize) tileInfo.lakeDepth;
+  residentFish[fishIndex].fishType.type.evasion = 1 + randRange(0, tileInfo.lakeDepth);
   residentFish[fishIndex].curFace = randRange(0, 6);
   assignFishMoveTarget(fishIndex);
   residentFish[fishIndex].moveTimer.set(FISH_MOVE_RATE_PAUSE);
@@ -1244,16 +1344,40 @@ void tryToSpawnFish()
 
 void assignFishMoveTarget(byte fishIndex)
 {
-  // Figure out which neighbors are present, are lake tiles, and are of the same depth as us
+  // 50/50 chance of leaving for a neighbor tile
+  byte leaveTile = randRange(0, 2);
+
+  // Figure out which neighbors are present, are lake tiles, and are of a depth that can accommodate this fish
   byte numValidTargetTiles = 0;
   FOREACH_FACE(f)
   {
-    if (neighborTileInfo[f].tileType == TileType_Lake &&
-        neighborTileInfo[f].lakeDepth == tileInfo.lakeDepth)
+    if (neighborTileInfo[f].tileType == TileType_Lake)
+    {
+      char depthDiff = neighborTileInfo[f].lakeDepth - residentFish[fishIndex].fishType.type.size;
+      if (depthDiff <= 1 && depthDiff >= -1)
       {
         fishMoveTargetTiles[numValidTargetTiles] = f;
         numValidTargetTiles++;
+
+        // Luring a fish will either force it to pick the given tile, or force it to avoid it
+        if (tugFace == f)
+        {
+          tugFace = INVALID_FACE;   // only lure one fish per tug
+          if (tugScare)
+          {
+            numValidTargetTiles--;  // fish scared - skip it
+          }
+          else
+          {
+            // Fish will definitely go towards the tug
+            fishMoveTargetTiles[0] = f;
+            numValidTargetTiles = 1;
+            leaveTile = 1;
+            break;
+          }
+        }
       }
+    }
   }
 
   // Once here, fishMoveTargetTiles[] will contain a list of faces that point to valid move targets.
@@ -1264,9 +1388,6 @@ void assignFishMoveTarget(byte fishIndex)
   // with numValidTargetTiles=3
   // 
   // A tile surrounded by zero valid tiles will have an empty array and numValidTargetTiles=0
-
-  // 50/50 chance of leaving for a neighbor tile
-  byte leaveTile = randRange(0, 2);
 
   if (leaveTile && numValidTargetTiles > 0)
   {
@@ -1289,7 +1410,7 @@ void moveFish()
 {
   for (byte fishIndex = 0; fishIndex < MAX_FISH_PER_TILE; fishIndex++)
   {
-    if (residentFish[fishIndex].fishType.size == FishSize_None)
+    if (residentFish[fishIndex].fishType.type.size == FishSize_None)
     {
       // No fish in this slot
       continue;
@@ -1323,7 +1444,7 @@ void moveFish()
       // slow enough that this doesn't happen much. Same thing happened in Terrarium when moving
       // critters between tiles.
       residentFish[fishIndex].destNeighbor = INVALID_FACE;
-      enqueueCommOnFace(residentFish[fishIndex].curFace, Command_FishTransfer, fishIndex);
+      enqueueCommOnFace(residentFish[fishIndex].curFace, Command_FishTransfer, residentFish[fishIndex].fishType.rawBits);
       return;
     }
 
@@ -1355,12 +1476,15 @@ void moveFish()
             // Automatic hook...for now
 
             // Save the fish info in the cast array
-            castInfo[castIndex].fishType.type = residentFish[fishIndex].fishType;
+            castInfo[castIndex].fishType = residentFish[fishIndex].fishType;
+            castInfo[castIndex].escaping = false;
+            castInfo[castIndex].escapeTimer.set(FISH_STRUGGLE_DELAY);
+            castInfo[castIndex].debug = false;
 
             // Remove fish from the resident fish array and communicate the fish info back to the player.
             // By telling the player now, we don't need to track the fish from tile to tile as the
             // player reels it in.
-            residentFish[fishIndex].fishType.size = FishSize_None;
+            residentFish[fishIndex].fishType.type.size = FishSize_None;
 
             enqueueCommOnFace(castInfo[castIndex].faceIn, Command_FishHooked, (byte) castInfo[castIndex].fishType.rawBits);
           }
@@ -1369,6 +1493,43 @@ void moveFish()
     }
   }
 }
+
+void fishStruggle()
+{
+  for (byte castIndex = 0; castIndex < MAX_CASTS_PER_TILE; castIndex++)
+  {
+    // Valid cast with a fish on the hook
+    if (castInfo[castIndex].faceIn != INVALID_FACE &&
+        castInfo[castIndex].faceOut == INVALID_FACE &&
+        castInfo[castIndex].fishType.type.size != FishSize_None)
+    {
+      if (castInfo[castIndex].escapeTimer.isExpired())
+      {
+        if (castInfo[castIndex].escaping)
+        {
+          // Fish escaped!
+          fishEscaped(&castInfo[castIndex]);
+        }
+        else
+        {
+          // Fish may try to escape
+          letFishStartEscaping(&castInfo[castIndex]);
+        }
+      }
+    }
+  }
+}
+
+void letFishStartEscaping(CastInfo *castInfo)
+{
+  byte escapeAttempt = randRange(0, 4);
+  if (escapeAttempt < castInfo->fishType.type.evasion)
+  {
+    castInfo->escaping = true;
+    castInfo->escapeTimer.set(FISH_STRUGGLE_DELAY);
+  }
+}
+
 #endif // ENABLE_LAKE_TILE
 
 // ====================================================================================================
@@ -1409,7 +1570,7 @@ void checkShoreWave()
 
 // ----------------------------------------------------------------------------------------------------
 
-void startRipple()
+void startRipple(bool lure)
 {
   if (tileInfo.tileType != TileType_Lake)
   {
@@ -1423,7 +1584,7 @@ void startRipple()
   {
     if (neighborTileInfo[f].tileType == TileType_Lake)
     {
-      enqueueCommOnFace(f, Command_LakeFX, LakeFX_Ripple);
+      enqueueCommOnFace(f, Command_LakeFX, lure ? LakeFX_Lure : LakeFX_Ripple);
     }
   }
 }
@@ -1484,13 +1645,13 @@ void render()
           switch (tileInfo.lakeDepth)
           {
             case LakeDepth_Shallow:
-            {
-              color.as_uint16 = LAKE_COLOR_SHALLOW;
+              {
+                color.as_uint16 = LAKE_COLOR_SHALLOW;
 
-              // Shore wave, if present
-              byte shoreWaveColor = getWaveColor(neighborTileInfo[f].tileType == TileType_Lake, shoreWaveValue);
-              lightenColor(&color, shoreWaveColor);
-            }
+                // Shore wave, if present
+                byte shoreWaveColor = getWaveColor(neighborTileInfo[f].tileType == TileType_Lake, shoreWaveValue);
+                lightenColor(&color, shoreWaveColor);
+              }
               break;
             case LakeDepth_Medium:
               color.as_uint16 = LAKE_COLOR_MEDIUM;
@@ -1523,11 +1684,23 @@ void render()
           // Fish, if present
           for (byte fishIndex = 0; fishIndex < MAX_FISH_PER_TILE; fishIndex++)
           {
-            if (residentFish[fishIndex].fishType.size != FishSize_None && residentFish[fishIndex].curFace == f)
+            if (residentFish[fishIndex].fishType.type.size != FishSize_None && residentFish[fishIndex].curFace == f)
             {
-              color.b >>= 1;
-              //color.g = 31;
-              //color.r = 31;
+              color.b = color.r = color.g = 31;//>>= 1;
+
+              // DEBUG SHOW FISH SIZE
+              if (residentFish[fishIndex].fishType.type.size == FishSize_Medium)
+              {
+                color.b = 0;
+              }
+              else if (residentFish[fishIndex].fishType.type.size == FishSize_Large)
+              {
+                color.g = 0;
+              }
+
+              //color.r >>= residentFish[fishIndex].fishType.type.evasion;
+              //color.g >>= residentFish[fishIndex].fishType.type.evasion;
+              //color.r >>= residentFish[fishIndex].fishType.type.evasion;
             }
           }
 
@@ -1542,6 +1715,25 @@ void render()
             if (castInfo[castIndex].fishType.type.size != FishSize_None && castInfo[castIndex].faceOut == INVALID_FACE)
             {
               color.r = color.g = color.b = (millis() >> 5) & 0x1F;
+
+              if (castInfo[castIndex].escaping)
+              {
+                color.g = color.b = 0;
+              }
+
+              if (castInfo[castIndex].debug)
+              {
+                color.r = 0;
+              }
+
+              /*
+              // DEBUG SHOW WHEN WE CAN TUG AGAIN
+              if (!tugRepeatTimer.isExpired())
+              {
+                color.g >>= 1; color.b >>= 1;
+              }
+              */
+
               setFaceColor(castInfo[castIndex].faceIn, color);
             }
             else
