@@ -225,6 +225,8 @@ enum PlayerState
 PlayerState playerState = PlayerState_Idle;
 
 // Timer used to show different animations
+#define PLAYER_ANIM_DELAY_IDLE1 (200>>4)
+#define PLAYER_ANIM_DELAY_IDLE2 (2000>>4)
 byte playerAnimStageDelays_FishCaught[] = { 200>>4, 200>>4, 500>>4 };
 byte playerAnimStage;
 byte playerAnimStep;
@@ -649,7 +651,7 @@ void processCommForFace(byte commandByte, byte value, byte f)
                   else if (value == LineAction_Reel)
                   {
                     // If the fish is in the process of escaping, reeling causes it to escape
-                    if (castInfo[castIndex].escaping)
+                    if (castInfo[castIndex].fishType.type.size != FishSize_None && castInfo[castIndex].escaping)
                     {
                       fishEscaped(&castInfo[castIndex]);
                     }
@@ -777,6 +779,22 @@ void processCommForFace(byte commandByte, byte value, byte f)
 #ifdef ENABLE_LAKE_TILE
 void fishEscaped(CastInfo *castInfo)
 {
+  // Drop the fish back in the pond!
+  for (byte fishIndex = 0; fishIndex < MAX_FISH_PER_TILE; fishIndex++)
+  {
+    // Find a slot for the fish - or else the fish gets discarded
+    if (residentFish[fishIndex].fishType.type.size == FishSize_None)
+    {
+      residentFish[fishIndex].fishType = castInfo->fishType;
+      residentFish[fishIndex].curFace = castInfo->faceIn;
+      assignFishMoveTarget(fishIndex);
+      residentFish[fishIndex].moveTimer.set(FISH_MOVE_RATE_PAUSE);
+      break;
+    }
+  }
+  // Remove the fish from the hook
+  castInfo->fishType.type.size = FishSize_None;
+
   // Propagate the break up the line
   // Do this before calling breakLine() since it clears faceIn
   enqueueCommOnFace(castInfo->faceIn, Command_LineAction, LineAction_Break);
@@ -792,7 +810,7 @@ void breakLine(byte sourceFace)
   // If a player receives this then their line was broken and they should go back to idle
   if (tileInfo.tileType == TileType_Player)
   {
-    playerState = PlayerState_MustDisconnect;
+    playerState = PlayerState_Idle;
     castInfo[0].faceOut = INVALID_FACE;
     return;
   }
@@ -1157,11 +1175,13 @@ void loop_Player()
             }
             else
             {
+              // Non-contiguous lake tiles - force the player to disconnect
               playerState = PlayerState_MustDisconnect;
             }
           }
           else
           {
+            // More than 3 lake tiles attached - force the player to disconnect
             playerState = PlayerState_MustDisconnect;
           }
         }
@@ -1835,22 +1855,20 @@ void render()
             break;
 
           case PlayerState_Idle:
-            setFaceColor(0, WHITE);
-            setFaceColor(3, color);
-            /*
+            setColor(playerColorDim);
+            if (playerAnimStage == 0 && playerAnimStep < FACE_COUNT)
+            {
+              setColorOnFace(color, playerAnimStep);
+            }
+
             // In the idle state we show our bag and how many fish we have caught
             for (byte fishIndex = 0; fishIndex < MAX_CAUGHT_FISH; fishIndex++)
             {
-              color.as_uint16 = playerColors[playerColorIndex];
-              if (caughtFishInfo[fishIndex].fishType.size == FishSize_None)
+              if (caughtFishInfo[fishIndex].fishType.size != FishSize_None)
               {
-                color.r >>= 1;
-                color.g >>= 1;
-                color.b >>= 1;
+                setColorOnFace(WHITE, fishIndex);
               }
-              setFaceColor(fishIndex, color);
             }
-            */
             break;
 
           case PlayerState_GetCastAngle:
@@ -1992,8 +2010,33 @@ void animatePlayer()
     return;
   }
 
+  byte nextTimerVal = 0;
+
   switch (playerState)
   {
+    case PlayerState_Idle:
+    {
+      nextTimerVal = PLAYER_ANIM_DELAY_IDLE1;
+
+      switch (playerAnimStage)
+      {
+        case 0:
+          playerAnimStep++;
+          if (playerAnimStep >= FACE_COUNT)
+          {
+            playerAnimStage = 1;
+            nextTimerVal = PLAYER_ANIM_DELAY_IDLE2;
+          }
+          break;
+
+        default:
+          playerAnimStage = 0;
+          playerAnimStep = 0;
+          break;
+      }
+    }
+    break;
+
     case PlayerState_FishCaught:
     {
       // Fish caught animation
@@ -2023,10 +2066,12 @@ void animatePlayer()
       }
 
       // Start the new anim timer
-      playerAnimTimer.set(playerAnimStageDelays_FishCaught[playerAnimStage] << 4);
+      nextTimerVal = playerAnimStageDelays_FishCaught[playerAnimStage];
     }
     break;
   }
+  // Start the new anim timer
+  playerAnimTimer.set(nextTimerVal << 4);
 }
 #endif
 
