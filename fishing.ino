@@ -434,25 +434,13 @@ CastSweepDirection castSweepDirection;    // true = forward, false = backward
 #define FISH_STRUGGLE_DURATION  2000
 #define FISH_STRUGGLE_DELAY     6000
 
-enum CastState : uint8_t
-{
-  CastState_Empty,
-  CastState_Casting,
-  CastState_Present,
-  CastState_PulsingToHook,
-  CastState_PulsingToPlayer,
-  CastState_Breaking,
-};
-
 struct CastInfo
 {
-  CastState castState_UNUSED;
   byte faceIn;            // the face where the line enters from the player
   byte faceOut;           // the face where the line exits towards the lake (INVALID if there is no exit)
   FishTypeUnion fishType; // type of fish on the hook
   bool escaping;          // the fish is trying to escape (tug to cancel before timer expires)
   Timer escapeTimer;      // time until fish escapes
-  bool debug_UNUSED;
 };
 #define MAX_CASTS_PER_TILE 4
 #define INVALID_CAST 15
@@ -655,15 +643,19 @@ void processCommForFace(byte commandByte, byte value, byte f)
   switch (command)
   {
     case Command_TileInfo:
-      if (neighborTileInfo[f].tileType != (TileType) (value & 0x3))
-      {
+    {
+      TileType newTileType = (TileType) (value & 0x3);
 #ifdef ENABLE_FISHERFOLK_TILE
-        // Force the player to recompute casting info
+      if (neighborTileInfo[f].tileType != newTileType && newTileType == TileType_Lake)
+      {
+        // If a lake neighbor was added, force the player to recompute casting info
         playerState = PlayerState_Idle;
-#endif
+        breakLine(f);
       }
-      neighborTileInfo[f].tileType  = (TileType) (value & 0x3);
+#endif
+      neighborTileInfo[f].tileType  = newTileType;
       neighborTileInfo[f].lakeDepth = value >> 2;
+    }
       break;
 
 #ifdef ENABLE_LAKE_TILE
@@ -732,11 +724,22 @@ void processCommForFace(byte commandByte, byte value, byte f)
     case Command_CastDir4:
       // Capture the casting info
       {
+        byte castDir = command - Command_CastDir0;
+        byte stepsToGo = value & 0x3;
+        byte currentStep = value >> 2;
+        byte castFaceOut = INVALID_FACE;
+        if (stepsToGo > 0)
+        {
+          byte castStepDir = castSteps[castDir][currentStep];
+          castFaceOut = CW_FROM_FACE(f, castStepDir);
+        }
+
         // First check if this is already used for another cast
         // By only allowing a single line to use a face we simplify some comm packets
         bool breakLine = false;
         for (byte castIndex = 0; castIndex < MAX_CASTS_PER_TILE; castIndex++)
         {
+          // Check if face in matches any casts
           if (castInfo[castIndex].faceIn == f)
           {
             breakLine = true;
@@ -744,6 +747,21 @@ void processCommForFace(byte commandByte, byte value, byte f)
           else if (castInfo[castIndex].faceIn != INVALID_FACE && castInfo[castIndex].faceOut == f)
           {
             breakLine = true;
+          }
+
+          // Check if face out matches any casts
+          if (castFaceOut != INVALID_FACE)
+          {
+            if (castInfo[castIndex].faceIn == castFaceOut)
+            {
+              // Face in is used by another cast
+              breakLine = true;
+            }
+            else if (castInfo[castIndex].faceIn != INVALID_FACE && castInfo[castIndex].faceOut == castFaceOut)
+            {
+              // Face out is used by another cast
+              breakLine = true;
+            }
           }
         }
         // Can't reuse a face for two casts
@@ -771,6 +789,10 @@ void processCommForFace(byte commandByte, byte value, byte f)
               {
                 byte castStepDir = castSteps[castDir][currentStep];
                 byte castFaceOut = CW_FROM_FACE(f, castStepDir);
+
+                // Make sure the out face isn't used by another cast
+
+
                 castInfo[castIndex].faceOut = castFaceOut;
 
                 if (neighborTileInfo[castFaceOut].tileType != TileType_Lake)
@@ -796,12 +818,12 @@ void processCommForFace(byte commandByte, byte value, byte f)
               break;
             }
           }
-          if (breakLine)
-          {
-            // Too many lines passing through here
-            // Tell the new one to go away
-            enqueueCommOnFace(f, Command_LineAction, LineAction_Break);
-          }
+        }
+        if (breakLine)
+        {
+          // Too many lines passing through here
+          // Tell the new one to go away
+          enqueueCommOnFace(f, Command_LineAction, LineAction_Break);
         }
       }
       break;
@@ -999,6 +1021,13 @@ void breakLine(byte sourceFace)
 #ifdef ENABLE_FISHERFOLK_TILE
   // If a player receives this then their line was broken and they should go back to idle
   playerState = PlayerState_Idle;
+
+  // If the break came from a different direction then make sure the line breaks too
+  if (playerCastInfo.faceOut != INVALID_FACE && sourceFace != playerCastInfo.faceOut)
+  {
+    enqueueCommOnFace(playerCastInfo.faceOut, Command_LineAction, LineAction_Break);
+  }
+
   playerCastInfo.faceOut = INVALID_FACE;
 #endif  // ENABLE_FISHERFOLK_TILE
 
@@ -1013,13 +1042,14 @@ void breakLine(byte sourceFace)
       {
         enqueueCommOnFace(castInfo[castIndex].faceOut, Command_LineAction, LineAction_Break);
       }
+      castInfo[castIndex].faceIn = INVALID_FACE;
     }
     else if (castInfo[castIndex].faceOut != INVALID_FACE && sourceFace == castInfo[castIndex].faceOut)
     {
       // Received the break from down the line - propagate it up
       enqueueCommOnFace(castInfo[castIndex].faceIn, Command_LineAction, LineAction_Break);
+      castInfo[castIndex].faceIn = INVALID_FACE;
     }
-    castInfo[castIndex].faceIn = INVALID_FACE;
   }
 #endif  // ENABLE_LAKE_TILE
 }
@@ -1203,16 +1233,18 @@ void detectNeighbors()
     {
       // No neighbor
 
-      // Was neighbor just removed?
-      if (neighborTileInfo[f].tileType != TileType_NotPresent)
-      {
 #ifdef ENABLE_FISHERFOLK_TILE
-        // If we are a player tile then force recompute the casting info
+      // Lake tile removed from next to the player - recompute casting info
+      if (neighborTileInfo[f].tileType == TileType_Lake)
+      {
         playerState = PlayerState_Idle;
         breakLine(f);
+      }
 #endif  // ENABLE_FISHERFOLK_TILE
 
 #ifdef ENABLE_LAKE_TILE
+      if (neighborTileInfo[f].tileType != TileType_NotPresent)
+      {
         // Removing the source of a cast breaks the line
         for (byte castIndex = 0; castIndex < MAX_CASTS_PER_TILE; castIndex++)
         {
@@ -1224,8 +1256,8 @@ void detectNeighbors()
             }
           }
         }
-#endif
       }
+#endif
 
       neighborTileInfo[f].tileType = TileType_NotPresent;
     }
@@ -1238,11 +1270,6 @@ void detectNeighbors()
       {
         // New neighbor
         neighborTileInfo[f].tileType = TileType_Unknown;
-
-#ifdef ENABLE_FISHERFOLK_TILE
-        // If we are a player tile then force recompute the casting info
-        playerState = PlayerState_Idle;
-#endif  // ENABLE_FISHERFOLK_TILE
       }
       else if (neighborTileInfo[f].tileType == TileType_Lake)
       {
