@@ -1,3 +1,6 @@
+// Blinks Fishing
+// (c) 2022 Scott Cartier
+
 #include <commlib.h>
 
 #define ENABLE_LAKE_TILE
