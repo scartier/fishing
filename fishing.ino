@@ -1,7 +1,7 @@
 #include <commlib.h>
 
-//#define ENABLE_LAKE_TILE
-#define ENABLE_FISHERFOLK_TILE
+#define ENABLE_LAKE_TILE
+//#define ENABLE_FISHERFOLK_TILE
 
 byte faceOffsetArray[] = { 0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5 };
 
@@ -57,6 +57,14 @@ enum LakeDepth : uint8_t
   LakeDepth_Deep,
 };
 
+uint16_t WaterColors[] =
+{
+  0,
+  LAKE_COLOR_SHALLOW,
+  LAKE_COLOR_MEDIUM,
+  LAKE_COLOR_DEEP
+};
+
 #endif  // ENABLE_LAKE_TILE
 
 // ----------------------------------------------------------------------------------------------------
@@ -89,7 +97,7 @@ struct FishType
 {
   FishSize size : 2;
   byte evasion  : 2;
-  byte UNUSED   : 4;
+  byte UNUSED   : 4;  // do not use - keep data at 4 bits to fit in a comm packet
 };
 
 union FishTypeUnion
@@ -110,7 +118,7 @@ struct FishInfo
   byte destNeighbor;
 };
 
-#define FISH_MOVE_RATE_NORMAL 500
+#define FISH_MOVE_RATE_NORMAL 800
 #define FISH_MOVE_RATE_PAUSE 3000
 
 #define MAX_FISH_PER_TILE 3
@@ -124,40 +132,199 @@ FishInfo residentFish[MAX_FISH_PER_TILE];
 
 #ifdef ENABLE_FISHERFOLK_TILE
 
-enum FishDisplay
+enum FishDisplay : uint8_t
 {
-  FishDisplay_Basic,      // two faces - no animation
-  FishDisplay_Tail,       // two faces + tail that animates
-  FishDisplay_Eel,        // ¯\_(ツ)_/¯ three faces in a line that animates around the tile
-  FishDisplay_Puffer,     // two opposite faces - animates into all six faces
+  FishDisplay_None,
+
+  // Small Fish: Single face
+  FishDisplay_Sm1,        // single tail
+  FishDisplay_Sm2Split,   // 2 face split tail
+  FishDisplay_Sm2Big,     // 2 face big tail
+
+  // Medium Fish: Two faces
+  FishDisplay_Md1,        // single tail
+  FishDisplay_Md2Wave,    // 1-2 face tail up and down
+  FishDisplay_Md2Split,   // 2 face tail split
+  FishDisplay_Md3Wave,    // 2-3 face tail up and down
+  FishDisplay_Md4Circle,  // single tail in a circular motion
+
+  // Large Fish: Three+ faces
+  FishDisplay_Lg1,        // three faces - single tail
+  FishDisplay_Lg2,        // three faces - large tail
+  FishDisplay_Lg2Ripple,  // four faces - color ripples across body
+
+  // Special
+  FishDisplay_Eel,        // special: three faces that move in a line around the tile
+  FishDisplay_Puffer,     // special: two opposite faces - puffs into all six faces
+  FishDisplay_Strike,     // one face - quickly strikes and then retreats
 
   FishDisplay_MAX
 };
 
-// TODO : Change to a single array of frames with indexes to start frames
-#define FISH_ANIM_MAX_FRAMES 6
-byte fishDisplayAnims[FishDisplay_MAX][FISH_ANIM_MAX_FRAMES] =
+FishDisplay FishTypeToDisplayOptions[3][7] =
 {
-  { 0b000011, 0xFF },
-  { 0b001011, 0b010011, 0xFF },
-  { 0b000111, 0b001110, 0b011100, 0b111000, 0b110001, 0b100011 },
-  { 0b001001, 0b111111, 0xFF }
+  // Shallow
+  {
+    FishDisplay_Sm1,        // evasion 1
+    FishDisplay_Sm1,        // evasion 1
+    FishDisplay_Md1,        // evasion 1-2
+    FishDisplay_Md1,        // evasion 2
+    FishDisplay_Sm2Split,   // evasion 2-3
+    FishDisplay_Sm2Big,     // evasion 3
+    FishDisplay_Md2Wave     // evasion 3
+  },
+
+  // Medium
+  {
+    FishDisplay_Md1,        // evasion 1
+    FishDisplay_Md2Wave,    // evasion 1
+    FishDisplay_Md2Split,   // evasion 1-2
+    FishDisplay_Md3Wave,    // evasion 2
+    FishDisplay_Md4Circle,  // evasion 2-3
+    FishDisplay_Eel,        // evasion 3
+    FishDisplay_Strike,     // evasion 3
+  },
+
+  // Deep
+  {
+    FishDisplay_Md3Wave,    // evasion 1
+    FishDisplay_Lg1,        // evasion 1
+    FishDisplay_Lg2,        // evasion 1-2
+    FishDisplay_Lg2Ripple,  // evasion 2
+    FishDisplay_Puffer,     // evasion 2-3
+    FishDisplay_Eel,        // evasion 3
+    FishDisplay_Strike,     // evasion 3
+  }
 };
+
+#define END_OF_ANIM 0xFF
+struct AnimFrameInfo
+{
+  byte bitwiseColor1;
+  byte bitwiseColor2;
+  byte delay;
+};
+AnimFrameInfo fishDisplayAnimFrames[] =
+{
+  // ============================
+  // SMALL FISH (one face + tail)
+  // ============================
+
+  // Sm1
+  { 0b000001, 0b000100, 5 }, { 0b000001, 0b001000, 5 },
+  { 0b000001, 0b010000, 5 }, { 0b000001, 0b001000, 5 },
+  { END_OF_ANIM },
+
+  // Sm2Split
+  { 0b000001, 0b010100, 10 }, { 0b000001, 0b001000, 10 },
+  { END_OF_ANIM },
+
+  // Sm2Split
+  { 0b000001, 0b001100, 10 }, { 0b000001, 0b011000, 10 },
+  { END_OF_ANIM },
+
+
+  // =============================
+  // MEDIUM FISH (two faces + tail)
+  // =============================
+
+  // Md1
+  { 0b000011, 0b001000, 10 }, { 0b000011, 0b010000, 10 },
+  { END_OF_ANIM },
+
+  // Md2Wave
+  { 0b000011, 0b110000, 10 }, { 0b000011, 0b010000, 5 },
+  { 0b000011, 0b011000, 10 }, { 0b000011, 0b001000, 5 },
+  { 0b000011, 0b001100, 10 }, { 0b000011, 0b001000, 5 },
+  { 0b000011, 0b011000, 10 }, { 0b000011, 0b010000, 5 },
+  { END_OF_ANIM },
+
+  // Md2Split
+  { 0b000011, 0b100100, 5 }, { 0b000011, 0b011000, 10 },
+  { END_OF_ANIM },
+
+  // Md3Wave
+  { 0b000011, 0b001100, 10 }, { 0b000011, 0b111000, 5 },
+  { 0b000011, 0b110000, 10 }, { 0b000011, 0b011100, 5 },
+  { END_OF_ANIM },
+
+  // Md4Circle
+  { 0b000011, 0b000100, 5 }, { 0b000011, 0b001000, 5 },
+  { 0b000011, 0b010000, 5 }, { 0b000011, 0b100000, 5 },
+  { END_OF_ANIM },
+
+  // ================================
+  // LARGE FISH (three+ faces + tail)
+  // ================================
+
+  // Lg1
+  { 0b000111, 0b010000, 10 }, { 0b000111, 0b100000, 10 },
+  { 0b000111, 0b010000, 10 }, { 0b000111, 0b001000, 10 },
+  { END_OF_ANIM },
+
+  // Lg2
+  { 0b000111, 0b110000, 5 }, { 0b000111, 0b011000, 5 },
+  { END_OF_ANIM },
+
+  // Lg2Ripple
+  { 0b001111, 0b000000, 100 },
+  { 0b001001, 0b000110, 10 }, { 0b000110, 0b001001, 10 }, { 0b000110, 0b110000, 10 },
+  { END_OF_ANIM },
+
+
+  // ==========================
+  // SPECIAL (not typical fish)
+  // ==========================
+
+  // Eel
+  { 0b000010, 0b000101, 50 }, { 0b001010, 0b000101, 10 },
+  { 0b001010, 0b000100, 50 }, { 0b001010, 0b010100, 10 },
+  { 0b001000, 0b010100, 50 }, { 0b101000, 0b010100, 10 },
+  { 0b101000, 0b010000, 50 }, { 0b101000, 0b010001, 10 },
+  { 0b100000, 0b010001, 50 }, { 0b100010, 0b010001, 10 },
+  { 0b100010, 0b000001, 50 }, { 0b100010, 0b000101, 10 },
+  { END_OF_ANIM },
+
+  // Puffer
+  { 0b001001, 0b000000, 100 },
+  { 0b001001, 0b110110, 200 },
+  { END_OF_ANIM },
+
+  // Strike
+  { 0b000001, 0b000000, 200 },
+  { 0b000010, 0b000001, 2 }, { 0b000101, 0b000010, 2 }, { 0b001010, 0b000101, 2 },
+  { 0b010101, 0b001010, 30 },
+  { 0b001010, 0b000101, 2 }, { 0b000101, 0b000010, 2 }, { 0b000010, 0b000001, 2 },
+  { END_OF_ANIM },
+
+};
+byte fishDisplayAnimStartIndexes[FishDisplay_MAX];
 
 #define CAUGHT_FISH_IN_BAG_DIM 192
 
 struct CaughtFishInfo
 {
-  FishType fishType;
   FishDisplay display;
-  byte animFrame;
-  Color color1;
-  Color color2;
+  uint16_t color1;
+  uint16_t color2;
 };
 
 #define MAX_CAUGHT_FISH 6
-CaughtFishInfo caughtFishInfo[MAX_CAUGHT_FISH];
+CaughtFishInfo caughtFishInfo[MAX_CAUGHT_FISH] =
+{
+  // { FishDisplay_Md3Wave, RGB_TO_U16(128, 64, 0), RGB_TO_U16(128, 128, 0) },
+  // { FishDisplay_Lg1, RGB_TO_U16(128, 64, 0), RGB_TO_U16(128, 128, 0) },
+  // { FishDisplay_Lg2,    RGB_TO_U16(128, 64, 0), RGB_TO_U16(128, 128, 0) },
+  // { FishDisplay_Lg2Ripple, RGB_TO_U16(128, 64, 0), RGB_TO_U16(128, 128, 0) },
+  // { FishDisplay_Md4Circle, RGB_TO_U16(128, 64, 0), RGB_TO_U16(128, 128, 0) },
+  // { FishDisplay_Md2Wave, RGB_TO_U16(128, 64, 0), RGB_TO_U16(128, 128, 0) },
+};
 byte newlyCaughtFishIndex = MAX_CAUGHT_FISH;
+
+// Fish animation display
+byte fishDisplayingIndex = MAX_CAUGHT_FISH;
+byte fishAnimFrame = 0;
+Timer fishAnimTimer;
 
 #endif // ENABLE_FISHERFOLK_TILE
 
@@ -208,13 +375,13 @@ byte numNeighborLakeTiles = 0;
 #define MAX_PLAYER_COLORS 7
 uint16_t playerColors[] =
 {
-  RGB_TO_U16( 160,  32,   0 ),
-  RGB_TO_U16( 192, 192,  96 ),
-  RGB_TO_U16( 224, 160,   0 ),
-  RGB_TO_U16( 112, 112,   0 ),
-  RGB_TO_U16( 216, 144,   0 ),
-  RGB_TO_U16(  16, 184,   0 ),
-  RGB_TO_U16( 128,   0, 128 ),
+  RGB_TO_U16( 160,  32,   0 ),  // red
+  RGB_TO_U16(   0, 192, 124 ),  // aquamarine
+  RGB_TO_U16( 224, 160,   0 ),  // orange
+  RGB_TO_U16( 112, 212,   0 ),  // greenish-yellow
+  RGB_TO_U16( 216,   0,  92 ),  // pink
+  RGB_TO_U16(  16, 184,  32 ),  // sea green
+  RGB_TO_U16( 108,   0, 178 ),  // purple
 };
 
 byte playerColorIndex = 0;
@@ -227,6 +394,7 @@ enum PlayerState
   PlayerState_WaitingForFish, // line has been cast - waiting for player to catch fish or line break
   PlayerState_FishCaught,     // fish was just caught - fancy anim
   PlayerState_MustDisconnect, // player must disconnect from the lake to go back to idle
+  PlayerState_ReleasingFish,  // discarding the fish (toss it back in the lake)
 };
 PlayerState playerState = PlayerState_Idle;
 
@@ -264,7 +432,7 @@ CastSweepDirection castSweepDirection;    // true = forward, false = backward
 #endif // ENABLE_FISHERFOLK_TILE
 
 #define FISH_STRUGGLE_DURATION  2000
-#define FISH_STRUGGLE_DELAY     5000
+#define FISH_STRUGGLE_DELAY     6000
 
 enum CastState : uint8_t
 {
@@ -456,6 +624,21 @@ void resetPlayerTile()
 {
   tileInfo.tileType = TileType_Player;
   playerState = PlayerState_MustDisconnect;
+
+  // Find the start of all the fish animations
+  // Do this at runtime to avoid human error of doing it manually
+  fishDisplayAnimStartIndexes[0] = 0;
+  fishDisplayAnimStartIndexes[1] = 0;
+  int frameIndex = 0;
+  for (int fishDisplayIndex = 2; fishDisplayIndex < FishDisplay_MAX; fishDisplayIndex++)
+  {
+    while (fishDisplayAnimFrames[frameIndex].bitwiseColor1 != END_OF_ANIM)
+    {
+      frameIndex++;
+    }
+    frameIndex++;
+    fishDisplayAnimStartIndexes[fishDisplayIndex] = frameIndex++;
+  }
 }
 #endif  // ENABLE_FISHERFOLK_TILE
 
@@ -503,7 +686,8 @@ void processCommForFace(byte commandByte, byte value, byte f)
       // Check if we have room for this fish
       for (byte fishIndex = 0; fishIndex < MAX_FISH_PER_TILE; fishIndex++)
       {
-        if (residentFish[fishIndex].fishType.type.size == FishSize_None)
+        FishType fishType = residentFish[fishIndex].fishType.type;
+        if (fishType.size == FishSize_None)
         {
           // Found an empty slot for a fish
           // Accept the fish and assign it a random destination
@@ -511,7 +695,7 @@ void processCommForFace(byte commandByte, byte value, byte f)
           residentFish[fishIndex].fishType.rawBits = value;
           residentFish[fishIndex].curFace = f;
           assignFishMoveTarget(fishIndex);
-          residentFish[fishIndex].moveTimer.set(FISH_MOVE_RATE_NORMAL);
+          residentFish[fishIndex].moveTimer.set(FISH_MOVE_RATE_NORMAL - 100 * fishType.evasion);
           break;
         }
       }
@@ -637,6 +821,8 @@ void processCommForFace(byte commandByte, byte value, byte f)
           case LineAction_Reel:
             for (byte castIndex = 0; castIndex < MAX_CASTS_PER_TILE; castIndex++)
             {
+              FishType fishType = castInfo[castIndex].fishType.type;
+
               if (castInfo[castIndex].faceIn == f)
               {
                 if (castInfo[castIndex].faceOut == INVALID_FACE)
@@ -644,7 +830,7 @@ void processCommForFace(byte commandByte, byte value, byte f)
                   // End of the line - do the tug/reel
                   if (value == LineAction_Tug)
                   {
-                    if (castInfo[castIndex].fishType.type.size == FishSize_None)
+                    if (fishType.size == FishSize_None)
                     {
                       startRipple(true);
                     }
@@ -653,15 +839,14 @@ void processCommForFace(byte commandByte, byte value, byte f)
                       // If a fish is escaping and we just tugged then CALM DOWN FISH JEEZ
                       if (castInfo[castIndex].escaping)
                       {
-                        castInfo[castIndex].escaping = false;
-                        castInfo[castIndex].escapeTimer.set(FISH_STRUGGLE_DELAY);
+                        setFishStruggleTimer(fishType.evasion);
                       }
                     }
                   }
                   else if (value == LineAction_Reel)
                   {
                     // If the fish is in the process of escaping, reeling causes it to escape
-                    if (castInfo[castIndex].fishType.type.size != FishSize_None && castInfo[castIndex].escaping)
+                    if (fishType.size != FishSize_None && castInfo[castIndex].escaping)
                     {
                       fishEscaped(&castInfo[castIndex]);
                     }
@@ -697,8 +882,7 @@ void processCommForFace(byte commandByte, byte value, byte f)
                 castInfo[castIndex].faceOut = INVALID_FACE;
 
                 // Assuming the fish is not escaping
-                castInfo[castIndex].escaping = false;
-                castInfo[castIndex].escapeTimer.set(FISH_STRUGGLE_DELAY);
+                setFishStruggleTimer(castInfo[castIndex].fishType.type.evasion);
 
                 // Randomly put the fish into escape mode (mwuahaha)
                 letFishStartEscaping(&castInfo[castIndex]);
@@ -829,21 +1013,6 @@ void breakLine(byte sourceFace)
       {
         enqueueCommOnFace(castInfo[castIndex].faceOut, Command_LineAction, LineAction_Break);
       }
-      else
-      {
-        // End of the cast - free any hooked fish
-        /*
-        int fishIndex = castInfo[castIndex].fishIndex;
-        if (fishIndex != INVALID_FISH)
-        {
-          if (residentFish[fishIndex].castIndex == castIndex)
-          {
-            residentFish[fishIndex].castIndex = INVALID_CAST;
-          }
-          castInfo[castIndex].fishIndex = INVALID_FISH;
-        }
-        */
-      }
     }
     else if (castInfo[castIndex].faceOut != INVALID_FACE && sourceFace == castInfo[castIndex].faceOut)
     {
@@ -863,24 +1032,72 @@ void caughtFish()
   // Find a spot in our bag for the fish
   for (byte fishIndex = 0; fishIndex < MAX_CAUGHT_FISH; fishIndex++)
   {
-    if (caughtFishInfo[fishIndex].fishType.size != FishSize_None)
+    if (caughtFishInfo[fishIndex].display != FishDisplay_None)
     {
       continue;
     }
 
     // Save the fish in our bag!
     newlyCaughtFishIndex = fishIndex;
-    caughtFishInfo[fishIndex].fishType = playerCastInfo.fishType.type;
-    caughtFishInfo[fishIndex].display = FishDisplay_Basic;
-    caughtFishInfo[fishIndex].animFrame = 0;
-    caughtFishInfo[fishIndex].color1.as_uint16 = RGB_TO_U16(128, 64, 0);
-    
+    FishType fishType = playerCastInfo.fishType.type;
+    uint8_t displayIndex = randRange(0, 3) + (fishType.evasion - 1) * 2;
+    caughtFishInfo[fishIndex].display = FishTypeToDisplayOptions[fishType.size - 1][displayIndex];
+    // Random colors
+    uint8_t primaryColor = randRange(0, 3);
+    caughtFishInfo[fishIndex].color1 = RandomFishColor(primaryColor);
+    primaryColor++;
+    if (primaryColor > 2)
+    {
+      primaryColor = 0;
+    }
+    caughtFishInfo[fishIndex].color2 = RandomFishColor(primaryColor);
+
     playerState = PlayerState_FishCaught;
     playerAnimStage = 0;
     playerAnimStep = 0;
     playerAnimTimer.set(playerAnimStageDelays_FishCaught[playerAnimStage] << 4);
     break;
   }
+}
+
+uint16_t RandomFishColor(uint8_t primaryColor)
+{
+  // Random colors
+  uint8_t color1 = 255;
+  uint8_t subValue = randRange(64, 192);
+  uint8_t color2 = color1 - subValue;
+  subValue = randRange(64, 192);
+  uint8_t color3 = (subValue >= color2) ? 0 : (color2 - subValue);
+
+  uint8_t r, g, b;
+  if (primaryColor == 0)
+  {
+    r = color1;
+    color1 = color3;
+  }
+  else if (primaryColor == 1)
+  {
+    r = color2;
+    color2 = color3;
+  }
+  else
+  {
+    r = color3;
+  }
+
+  uint8_t randGB = randRange(0, 2);
+  if (randGB == 0)
+  {
+    g = color1;
+    b = color2;
+  }
+  else
+  {
+    g = color2;
+    b = color1;
+  }
+
+  return RGB_TO_U16(r, g, b);
 }
 #endif  // ENABLE_FISHERFOLK_TILE
 
@@ -1068,7 +1285,7 @@ void loop_Player()
   byte numFishCaught = 0;
   for (byte fishIndex = 0; fishIndex < MAX_CAUGHT_FISH; fishIndex++)
   {
-    if (caughtFishInfo[fishIndex].fishType.size != FishSize_None)
+    if (caughtFishInfo[fishIndex].display != FishDisplay_None)
     {
       numFishCaught++;
     }
@@ -1090,6 +1307,9 @@ void loop_Player()
         // It starts by sweeping back-and-forth between the lake tiles that it is touching
         if (numNeighborLakeTiles > 0)
         {
+          // Reset the display in case the player was just browsing their bag
+          fishDisplayingIndex = MAX_CAUGHT_FISH;
+
           // Can only cast when touching at most three lake tiles
           // These tiles must be contiguous - that check is further down
           if (numNeighborLakeTiles <= 3)
@@ -1155,6 +1375,8 @@ void loop_Player()
         }
         else
         {
+          // Player tile has no neighboring lake tiles
+          // Let the user interact with it without casting
           if (buttonSingleClicked())
           {
             // Can only change our player color if we haven't caught any fish
@@ -1166,9 +1388,35 @@ void loop_Player()
                 playerColorIndex = 0;
               }
             }
+            else
+            {
+              // Cycle through the player's captured fish with each click
+              do
+              {
+                fishDisplayingIndex++;
+                if (fishDisplayingIndex >= MAX_CAUGHT_FISH)
+                {
+                  fishDisplayingIndex = 0;
+                }
+              } while (caughtFishInfo[fishDisplayingIndex].display == FishDisplay_None);
+
+              fishAnimFrame = fishDisplayAnimStartIndexes[caughtFishInfo[fishDisplayingIndex].display];
+              fishAnimTimer.set(fishDisplayAnimFrames[fishAnimFrame].delay << 4);
+            }
+          }
+          else if (buttonLongPressed())
+          {
+            // Toss the fish back (though it doesn't really get added back to the lake)
+            playerState = PlayerState_ReleasingFish;
           }
         }
       }
+      break;
+
+    case PlayerState_ReleasingFish:
+      caughtFishInfo[fishDisplayingIndex].display = FishDisplay_None;
+      fishDisplayingIndex = MAX_CAUGHT_FISH;
+      playerState = PlayerState_Idle;
       break;
 
     case PlayerState_GetCastAngle:
@@ -1301,21 +1549,6 @@ void loop_Player()
         {
           enqueueCommOnFace(castFace, Command_LineAction, LineAction_Reel);
         }
-        
-        /*
-        if (buttonPressed())
-        {
-          reelTimer.set(REEL_BUTTON_DURATION);
-        }
-        else if (buttonDown())
-        {
-          if (reelTimer.isExpired())
-          {
-            enqueueCommOnFace(castFace, Command_LineAction, LineAction_Reel);
-            reelTimer.set(REEL_BUTTON_DURATION * 2);
-          }
-        }
-        */
       }
       break;
   }
@@ -1370,7 +1603,7 @@ void tryToSpawnFish()
 
   numFishToSpawn--;
   residentFish[fishIndex].fishType.type.size = (FishSize) tileInfo.lakeDepth;
-  residentFish[fishIndex].fishType.type.evasion = 1 + randRange(0, tileInfo.lakeDepth);
+  residentFish[fishIndex].fishType.type.evasion = randRange(1, 4);
   residentFish[fishIndex].curFace = randRange(0, 6);
   assignFishMoveTarget(fishIndex);
   residentFish[fishIndex].moveTimer.set(FISH_MOVE_RATE_PAUSE);
@@ -1452,7 +1685,8 @@ void moveFish()
 {
   for (byte fishIndex = 0; fishIndex < MAX_FISH_PER_TILE; fishIndex++)
   {
-    if (residentFish[fishIndex].fishType.type.size == FishSize_None)
+    FishType fishType = residentFish[fishIndex].fishType.type;
+    if (fishType.size == FishSize_None)
     {
       // No fish in this slot
       continue;
@@ -1463,7 +1697,7 @@ void moveFish()
       // Fish in this slot is not ready to move yet
       continue;
     }
-    residentFish[fishIndex].moveTimer.set(FISH_MOVE_RATE_NORMAL);
+    residentFish[fishIndex].moveTimer.set(FISH_MOVE_RATE_NORMAL - 100 * fishType.evasion);
 
     // If the fish has reached its target then pick the next target
     if (residentFish[fishIndex].destNeighbor == INVALID_FACE &&
@@ -1517,15 +1751,15 @@ void moveFish()
           if (castInfo[castIndex].faceIn == residentFish[fishIndex].curFace)
           {
             // Automatic hook...for now
-            // TODO : Randomize
+            // TODO : Randomize (maybe? feels good as is)
             bool hooked = true;
 
             if (hooked)
             {
               // Save the fish info in the cast array
-              castInfo[castIndex].fishType = residentFish[fishIndex].fishType;
-              castInfo[castIndex].escaping = false;
-              castInfo[castIndex].escapeTimer.set(FISH_STRUGGLE_DELAY);
+              FishType fishType = residentFish[fishIndex].fishType.type;
+              castInfo[castIndex].fishType.type = fishType;
+              setFishStruggleTimer(fishType.evasion);
               //castInfo[castIndex].debug = false;
 
               // Remove fish from the lake
@@ -1574,9 +1808,15 @@ void letFishStartEscaping(CastInfo *castInfo)
   byte escapeAttempt = randRange(0, 4);
   if (escapeAttempt < castInfo->fishType.type.evasion)
   {
+    setFishStruggleTimer(castInfo->fishType.type.evasion);
     castInfo->escaping = true;
-    castInfo->escapeTimer.set(FISH_STRUGGLE_DELAY);
   }
+}
+
+void setFishStruggleTimer(uint8_t evasion)
+{
+  castInfo->escaping = false;
+  castInfo->escapeTimer.set(FISH_STRUGGLE_DELAY - 1000 * evasion);
 }
 
 #endif // ENABLE_LAKE_TILE
@@ -1681,23 +1921,14 @@ void render()
   // Base lake color
   FOREACH_FACE(f)
   {
-    switch (tileInfo.lakeDepth)
-    {
-      case LakeDepth_Shallow:
-        {
-          color.as_uint16 = LAKE_COLOR_SHALLOW;
+    Color waterColor;
+    waterColor.as_uint16 = WaterColors[tileInfo.lakeDepth];
+    color = waterColor;
 
-          // Shore wave, if present
-          byte shoreWaveColor = getWaveColor(neighborTileInfo[f].tileType == TileType_Lake, shoreWaveValue);
-          lightenColor(&color, shoreWaveColor);
-        }
-        break;
-      case LakeDepth_Medium:
-        color.as_uint16 = LAKE_COLOR_MEDIUM;
-        break;
-      case LakeDepth_Deep:
-        color.as_uint16 = LAKE_COLOR_DEEP;
-        break;
+    if (tileInfo.lakeDepth == LakeDepth_Shallow)
+    {
+      byte shoreWaveColor = getWaveColor(neighborTileInfo[f].tileType == TileType_Lake, shoreWaveValue);
+      lightenColor(&color, shoreWaveColor);
     }
 
     // Active ripple
@@ -1725,6 +1956,10 @@ void render()
     {
       if (residentFish[fishIndex].fishType.type.size != FishSize_None && residentFish[fishIndex].curFace == f)
       {
+        // Fish presence darkens the water
+        color.as_uint16 = (waterColor.as_uint16 >> 2) & 0b0011100111001110;
+
+        /*
         color.b = color.r = color.g = 31;//>>= 1;
 
         // DEBUG SHOW FISH SIZE
@@ -1736,10 +1971,7 @@ void render()
         {
           color.g = 0;
         }
-
-        //color.r >>= residentFish[fishIndex].fishType.type.evasion;
-        //color.g >>= residentFish[fishIndex].fishType.type.evasion;
-        //color.r >>= residentFish[fishIndex].fishType.type.evasion;
+        */
       }
     }
 
@@ -1760,20 +1992,6 @@ void render()
           color.g = color.b = 0;
         }
 
-/*
-        if (castInfo[castIndex].debug)
-        {
-          color.r = 0;
-        }
-*/
-        /*
-        // DEBUG SHOW WHEN WE CAN TUG AGAIN
-        if (!tugRepeatTimer.isExpired())
-        {
-          color.g >>= 1; color.b >>= 1;
-        }
-        */
-
         setFaceColor(castInfo[castIndex].faceIn, color);
       }
       else
@@ -1793,6 +2011,8 @@ void render()
   color.as_uint16 = playerColors[playerColorIndex];
   Color playerColorDim;
   playerColorDim.as_uint16 = (color.as_uint16 >> 1) & 0b0111101111011110;
+  Color playerColorBrighter;
+  playerColorBrighter.as_uint16 = (color.as_uint16 << 1) | color.as_uint16 | 0b0000100001000010;
   switch (playerState)
   {
     case PlayerState_MustDisconnect:
@@ -1800,19 +2020,26 @@ void render()
       break;
 
     case PlayerState_Idle:
-      setColor(playerColorDim);
-      if (playerAnimStage == 0 && playerAnimStep < FACE_COUNT)
+      if (fishDisplayingIndex == MAX_CAUGHT_FISH)
       {
-        setColorOnFace(color, playerAnimStep);
-      }
-
-      // In the idle state we show our bag and how many fish we have caught
-      for (byte fishIndex = 0; fishIndex < MAX_CAUGHT_FISH; fishIndex++)
-      {
-        if (caughtFishInfo[fishIndex].fishType.size != FishSize_None)
+        setColor(playerColorDim);
+        if (playerAnimStage == 0 && playerAnimStep < FACE_COUNT)
         {
-          setColorOnFace(WHITE, fishIndex);
+          setColorOnFace(color, playerAnimStep);
         }
+
+        // In the idle state we show our bag and how many fish we have caught
+        for (byte fishIndex = 0; fishIndex < MAX_CAUGHT_FISH; fishIndex++)
+        {
+          if (caughtFishInfo[fishIndex].display != FishDisplay_None)
+          {
+            setColorOnFace(playerColorBrighter, fishIndex);
+          }
+        }
+      }
+      else
+      {
+        animateFish();
       }
       break;
 
@@ -1893,7 +2120,7 @@ void render()
           case 1:
             FOREACH_FACE(f)
             {
-              if (caughtFishInfo[f].fishType.size != FishSize_None && f < playerAnimStep)
+              if (caughtFishInfo[f].display != FishDisplay_None && f < playerAnimStep)
               {
                 setFaceColor(f, dim(color, CAUGHT_FISH_IN_BAG_DIM));
               }
@@ -1904,7 +2131,7 @@ void render()
             {
               FOREACH_FACE(f)
               {
-                if (caughtFishInfo[f].fishType.size != FishSize_None)
+                if (caughtFishInfo[f].display != FishDisplay_None)
                 {
                   setFaceColor(f, dim(color, CAUGHT_FISH_IN_BAG_DIM));
                 }
@@ -2010,6 +2237,45 @@ void animatePlayer()
   }
   // Start the new anim timer
   playerAnimTimer.set(nextTimerVal << 4);
+}
+#endif
+
+#ifdef ENABLE_FISHERFOLK_TILE
+void animateFish()
+{
+  if (fishDisplayingIndex >= MAX_CAUGHT_FISH)
+  {
+    setColor(WHITE);
+    return;
+  }
+
+  if (fishAnimTimer.isExpired())
+  {
+    fishAnimFrame++;
+    if (fishDisplayAnimFrames[fishAnimFrame].bitwiseColor1 == END_OF_ANIM)
+    {
+      fishAnimFrame = fishDisplayAnimStartIndexes[caughtFishInfo[fishDisplayingIndex].display];
+    }
+    fishAnimTimer.set(fishDisplayAnimFrames[fishAnimFrame].delay << 4);
+  }
+
+  byte fishFrameColor1 = fishDisplayAnimFrames[fishAnimFrame].bitwiseColor1;
+  byte fishFrameColor2 = fishDisplayAnimFrames[fishAnimFrame].bitwiseColor2;
+  Color color;
+  FOREACH_FACE(f)
+  {
+    setColorOnFace(OFF, f);
+    if (fishFrameColor1 & 1<<f)
+    {
+      color.as_uint16 = caughtFishInfo[fishDisplayingIndex].color1; 
+      setColorOnFace(color, f);
+    }
+    else if (fishFrameColor2 & 1<<f)
+    {
+      color.as_uint16 = caughtFishInfo[fishDisplayingIndex].color2;
+      setColorOnFace(color, f);
+    }
+  }
 }
 #endif
 
